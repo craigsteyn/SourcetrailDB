@@ -4,8 +4,11 @@
 #include <map>
 #include <set>
 #include <algorithm>
+#include <chrono>
 
 #include "SourcetrailDBReader.h"
+
+#define LOG 0
 
 // Utility to print usage information
 void printUsage()
@@ -21,7 +24,7 @@ void printUsage()
     std::cout << "  graph <symbol>   - Show bidirectional dependency graph" << std::endl;
     std::cout << "  stats            - Show database statistics" << std::endl;
     std::cout << "  list             - List all symbols by kind" << std::endl;
-    std::cout << "  findtests <symbol> <test_namespace> - Find test classes in namespace that depend (directly or indirectly) on the symbol" << std::endl;
+    std::cout << "  findtests <symbol_kind|*> <symbol> <test_namespace> - Find test classes in namespace that depend (directly or indirectly) on the symbol. symbol_kind matches SymbolKind enum (e.g. CLASS) or * for any." << std::endl;
 }
 
 // Get a readable name from a symbol
@@ -62,31 +65,65 @@ std::string getSymbolKindName(sourcetrail::SymbolKind kind)
     }
 }
 
-// Get reference kind name
-std::string getReferenceKindName(sourcetrail::ReferenceKind kind)
+// Get edge kind name
+std::string getEdgeKindName(sourcetrail::EdgeKind kind)
 {
     switch (kind)
     {
-        case sourcetrail::ReferenceKind::TYPE_USAGE: return "Type Usage";
-        case sourcetrail::ReferenceKind::USAGE: return "Usage";
-        case sourcetrail::ReferenceKind::CALL: return "Call";
-        case sourcetrail::ReferenceKind::INHERITANCE: return "Inheritance";
-        case sourcetrail::ReferenceKind::OVERRIDE: return "Override";
-        case sourcetrail::ReferenceKind::TYPE_ARGUMENT: return "Type Argument";
-        case sourcetrail::ReferenceKind::TEMPLATE_SPECIALIZATION: return "Template Specialization";
-        case sourcetrail::ReferenceKind::INCLUDE: return "Include";
-        case sourcetrail::ReferenceKind::IMPORT: return "Import";
-        case sourcetrail::ReferenceKind::MACRO_USAGE: return "Macro Usage";
-        case sourcetrail::ReferenceKind::ANNOTATION_USAGE: return "Annotation Usage";
+        case sourcetrail::EdgeKind::MEMBER: return "Member";
+        case sourcetrail::EdgeKind::TYPE_USAGE: return "Type Usage";
+        case sourcetrail::EdgeKind::USAGE: return "Usage";
+        case sourcetrail::EdgeKind::CALL: return "Call";
+        case sourcetrail::EdgeKind::INHERITANCE: return "Inheritance";
+        case sourcetrail::EdgeKind::OVERRIDE: return "Override";
+        case sourcetrail::EdgeKind::TYPE_ARGUMENT: return "Type Argument";
+        case sourcetrail::EdgeKind::TEMPLATE_SPECIALIZATION: return "Template Specialization";
+        case sourcetrail::EdgeKind::INCLUDE: return "Include";
+        case sourcetrail::EdgeKind::IMPORT: return "Import";
+        case sourcetrail::EdgeKind::MACRO_USAGE: return "Macro Usage";
+        case sourcetrail::EdgeKind::ANNOTATION_USAGE: return "Annotation Usage";
         default: return "Unknown(" + std::to_string(static_cast<int>(kind)) + ")";
     }
+}
+
+// Parse a string into SymbolKind. Returns true on success. Accepts exact enum identifiers (case-insensitive).
+bool parseSymbolKind(const std::string& in, sourcetrail::SymbolKind& out)
+{
+    std::string s;
+    s.reserve(in.size());
+    for (char c : in)
+    {
+        s.push_back(static_cast<char>(::toupper(static_cast<unsigned char>(c))));
+    }
+    // Map string to enum
+    if (s == "TYPE") out = sourcetrail::SymbolKind::TYPE;
+    else if (s == "BUILTIN_TYPE") out = sourcetrail::SymbolKind::BUILTIN_TYPE;
+    else if (s == "MODULE") out = sourcetrail::SymbolKind::MODULE;
+    else if (s == "NAMESPACE") out = sourcetrail::SymbolKind::NAMESPACE;
+    else if (s == "PACKAGE") out = sourcetrail::SymbolKind::PACKAGE;
+    else if (s == "STRUCT") out = sourcetrail::SymbolKind::STRUCT;
+    else if (s == "CLASS") out = sourcetrail::SymbolKind::CLASS;
+    else if (s == "INTERFACE") out = sourcetrail::SymbolKind::INTERFACE;
+    else if (s == "ANNOTATION") out = sourcetrail::SymbolKind::ANNOTATION;
+    else if (s == "GLOBAL_VARIABLE") out = sourcetrail::SymbolKind::GLOBAL_VARIABLE;
+    else if (s == "FIELD") out = sourcetrail::SymbolKind::FIELD;
+    else if (s == "FUNCTION") out = sourcetrail::SymbolKind::FUNCTION;
+    else if (s == "METHOD") out = sourcetrail::SymbolKind::METHOD;
+    else if (s == "ENUM") out = sourcetrail::SymbolKind::ENUM;
+    else if (s == "ENUM_CONSTANT") out = sourcetrail::SymbolKind::ENUM_CONSTANT;
+    else if (s == "TYPEDEF") out = sourcetrail::SymbolKind::TYPEDEF;
+    else if (s == "TYPE_PARAMETER") out = sourcetrail::SymbolKind::TYPE_PARAMETER;
+    else if (s == "MACRO") out = sourcetrail::SymbolKind::MACRO;
+    else if (s == "UNION") out = sourcetrail::SymbolKind::UNION;
+    else return false;
+    return true;
 }
 
 // Show dependencies of a symbol (what it references)
 void showDependencies(sourcetrail::SourcetrailDBReader& reader, const std::string& symbolName)
 {
     auto symbols = (symbolName.find("::") != std::string::npos) ? 
-        reader.findSymbolsByQualifiedName(symbolName) : 
+        reader.findSymbolsByQualifiedName(symbolName, true) : 
         reader.findSymbolsByName(symbolName, false);
     
     if (symbols.empty())
@@ -115,18 +152,18 @@ void showDependencies(sourcetrail::SourcetrailDBReader& reader, const std::strin
         {
             std::cout << "  Dependencies (" << references.size() << "):" << std::endl;
             
-            std::map<sourcetrail::ReferenceKind, std::vector<int>> refsByKind;
+            std::map<sourcetrail::EdgeKind, std::vector<int>> refsByKind;
             for (const auto& ref : references)
             {
-                refsByKind[ref.referenceKind].push_back(ref.targetSymbolId);
+                refsByKind[ref.edgeKind].push_back(ref.targetSymbolId);
             }
             
             for (auto it = refsByKind.begin(); it != refsByKind.end(); ++it)
             {
-                sourcetrail::ReferenceKind kind = it->first;
+                sourcetrail::EdgeKind kind = it->first;
                 const std::vector<int>& targetIds = it->second;
                 
-                std::cout << "    " << getReferenceKindName(kind) << ":" << std::endl;
+                std::cout << "    " << getEdgeKindName(kind) << ":" << std::endl;
                 for (int targetId : targetIds)
                 {
                     auto targetSymbol = reader.getSymbolById(targetId);
@@ -142,7 +179,7 @@ void showDependencies(sourcetrail::SourcetrailDBReader& reader, const std::strin
 void showReferences(sourcetrail::SourcetrailDBReader& reader, const std::string& symbolName)
 {
     auto symbols = (symbolName.find("::") != std::string::npos) ? 
-        reader.findSymbolsByQualifiedName(symbolName) : 
+        reader.findSymbolsByQualifiedName(symbolName, true) : 
         reader.findSymbolsByName(symbolName, false);
     
     if (symbols.empty())
@@ -171,18 +208,18 @@ void showReferences(sourcetrail::SourcetrailDBReader& reader, const std::string&
         {
             std::cout << "  Referenced by (" << references.size() << "):" << std::endl;
             
-            std::map<sourcetrail::ReferenceKind, std::vector<int>> refsByKind;
+            std::map<sourcetrail::EdgeKind, std::vector<int>> refsByKind;
             for (const auto& ref : references)
             {
-                refsByKind[ref.referenceKind].push_back(ref.sourceSymbolId);
+                refsByKind[ref.edgeKind].push_back(ref.sourceSymbolId);
             }
             
             for (auto it = refsByKind.begin(); it != refsByKind.end(); ++it)
             {
-                sourcetrail::ReferenceKind kind = it->first;
+                sourcetrail::EdgeKind kind = it->first;
                 const std::vector<int>& sourceIds = it->second;
                 
-                std::cout << "    " << getReferenceKindName(kind) << ":" << std::endl;
+                std::cout << "    " << getEdgeKindName(kind) << ":" << std::endl;
                 for (int sourceId : sourceIds)
                 {
                     auto sourceSymbol = reader.getSymbolById(sourceId);
@@ -224,7 +261,7 @@ void showGraph(sourcetrail::SourcetrailDBReader& reader, const std::string& symb
             {
                 auto sourceSymbol = reader.getSymbolById(ref.sourceSymbolId);
                 std::cout << "    " << getSymbolName(sourceSymbol) 
-                          << " --[" << getReferenceKindName(ref.referenceKind) << "]--> " 
+                          << " --[" << getEdgeKindName(ref.edgeKind) << "]--> " 
                           << getSymbolName(symbol) << std::endl;
             }
         }
@@ -238,7 +275,7 @@ void showGraph(sourcetrail::SourcetrailDBReader& reader, const std::string& symb
             {
                 auto targetSymbol = reader.getSymbolById(ref.targetSymbolId);
                 std::cout << "    " << getSymbolName(symbol) 
-                          << " --[" << getReferenceKindName(ref.referenceKind) << "]--> " 
+                          << " --[" << getEdgeKindName(ref.edgeKind) << "]--> " 
                           << getSymbolName(targetSymbol) << std::endl;
             }
         }
@@ -269,19 +306,19 @@ void showStats(sourcetrail::SourcetrailDBReader& reader)
     
     // Group references by kind
     auto references = reader.getAllReferences();
-    std::map<sourcetrail::ReferenceKind, int> refCounts;
+    std::map<sourcetrail::EdgeKind, int> refCounts;
     
     for (const auto& ref : references)
     {
-        refCounts[ref.referenceKind]++;
+    refCounts[ref.edgeKind]++;
     }
     
     std::cout << std::endl << "References by kind:" << std::endl;
     for (auto it = refCounts.begin(); it != refCounts.end(); ++it)
     {
-        sourcetrail::ReferenceKind kind = it->first;
+    sourcetrail::EdgeKind kind = it->first;
         int count = it->second;
-        std::cout << "  " << getReferenceKindName(kind) << ": " << count << std::endl;
+    std::cout << "  " << getEdgeKindName(kind) << ": " << count << std::endl;
     }
 }
 
@@ -368,19 +405,31 @@ int main(int argc, const char* argv[])
         }
         else if (command == "findtests")
         {
-            if (argc < 5)
+            if (argc < 6)
             {
-                std::cerr << "Error: findtests requires <symbol_name> <test_namespace_pattern>" << std::endl;
+                std::cerr << "Error: findtests requires <symbol_kind|*> <symbol_name> <test_namespace_pattern>" << std::endl;
                 return 1;
             }
-            std::string symbolPattern = argv[3];
-            std::string testNamespace = argv[4]; // e.g. "UnitTests" or "My::UnitTests"
+            std::string symbolKindFilterStr = argv[3]; // may be *
+            std::string symbolPattern = argv[4];
+            std::string testNamespace = argv[5]; // e.g. "UnitTests" or "My::UnitTests"
+
+            bool applyKindFilter = symbolKindFilterStr != "*";
+            sourcetrail::SymbolKind kindFilterValue = sourcetrail::SymbolKind::CLASS; // default init
+            if (applyKindFilter)
+            {
+                if (!parseSymbolKind(symbolKindFilterStr, kindFilterValue))
+                {
+                    std::cerr << "Error: Unknown symbol kind '" << symbolKindFilterStr << "'. Use values from SymbolKind enum or *." << std::endl;
+                    return 1;
+                }
+            }
 
             // Support both unqualified and qualified symbol lookup. If the pattern contains
             // a scope operator we try qualified lookup first. Otherwise use name lookup.
             std::vector<sourcetrail::SourcetrailDBReader::Symbol> startSymbols;
             if (symbolPattern.find("::") != std::string::npos) {
-                startSymbols = reader.findSymbolsByQualifiedName(symbolPattern);
+                startSymbols = reader.findSymbolsByQualifiedName(symbolPattern, true);
                 if (startSymbols.empty()) {
                     // fallback: try tail element unqualified
                     auto pos = symbolPattern.rfind("::");
@@ -391,7 +440,7 @@ int main(int argc, const char* argv[])
                     }
                 }
             } else {
-                startSymbols = reader.findSymbolsByName(symbolPattern, false);
+                startSymbols = reader.findSymbolsByName(symbolPattern, true);
             }
 
             // De-duplicate startSymbols by id (possible if both lookups returned same symbols)
@@ -405,14 +454,28 @@ int main(int argc, const char* argv[])
                 }
                 startSymbols.swap(unique);
             }
+            if (applyKindFilter)
+            {
+                std::vector<sourcetrail::SourcetrailDBReader::Symbol> filtered;
+                filtered.reserve(startSymbols.size());
+                for (auto &s : startSymbols)
+                {
+                    if (s.symbolKind == kindFilterValue) filtered.push_back(s);
+                }
+                startSymbols.swap(filtered);
+            }
             if (startSymbols.empty())
             {
-                std::cerr << "No starting symbols found for pattern: " << symbolPattern << std::endl;
+                std::cerr << "No starting symbols found for pattern: " << symbolPattern;
+                if (applyKindFilter) std::cerr << " with kind filter '" << symbolKindFilterStr << "'";
+                std::cerr << std::endl;
                 return 1;
             }
 
             // Diagnostics: list starting symbols with full qualified names.
-            std::cout << "Resolved starting symbols (" << startSymbols.size() << "):" << std::endl;
+            std::cout << "Resolved starting symbols (" << startSymbols.size() << ")";
+            if (applyKindFilter) std::cout << " filtered by kind '" << symbolKindFilterStr << "'";
+            std::cout << ":" << std::endl;
             for (auto &s : startSymbols) {
                 std::string fqn;
                 for (size_t i=0;i<s.nameHierarchy.nameElements.size();++i) {
@@ -426,21 +489,19 @@ int main(int argc, const char* argv[])
             // Strategy: Walk incoming references (who depends on the current symbol) because
             // we want classes/tests that use the implementation under test. We stop when we reach
             // symbols whose fully qualified hierarchy starts with the given namespace delimiter.
-            struct QueueItem { int symbolId; int depth; };
+            // Queue element used during BFS. parentIndex points to the index inside
+            // the queue vector of the node from which this node was first reached.
+            // For initial start symbols parentIndex = -1.
+            struct QueueItem { int symbolId; int depth; int parentIndex; };
             std::set<int> visited;
-            std::vector<int> foundTestSymbols;
-            std::set<int> foundTestSymbolsSet; // for uniqueness
+            std::vector<std::pair<int,std::string>> foundTestSymbols; // (id, fqn)
+            std::set<int> foundTestSymbolsSet; // uniqueness by id
+            std::set<std::string> foundTestFqnsSet; // uniqueness by fqn
             std::vector<QueueItem> queue;
             queue.reserve(1024);
-            for (auto& s : startSymbols) { queue.push_back({s.id,0}); visited.insert(s.id); }
+            for (auto& s : startSymbols) { queue.push_back({s.id,0,-1}); visited.insert(s.id); }
 
             auto inNamespace = [&testNamespace](const sourcetrail::SourcetrailDBReader::Symbol& sym) -> bool {
-                // Serialize hierarchy into a FQN using nameDelimiter
-                std::string fqn;
-                for (size_t i=0;i<sym.nameHierarchy.nameElements.size();++i) {
-                    if (i) fqn += sym.nameHierarchy.nameDelimiter;
-                    fqn += sym.nameHierarchy.nameElements[i].name;
-                }
                 // Check if symbol is within the test namespace (but not the namespace itself)
                 // Look for testNamespace as a parent element, not the final element
                 if (sym.nameHierarchy.nameElements.size() > 1) {
@@ -455,16 +516,82 @@ int main(int argc, const char* argv[])
 
             size_t head = 0; // manual queue for performance
             const size_t BFS_LIMIT = 100000; // safety cap
+            std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
+            std::cout << "[findtests] BFS start. pattern='" << symbolPattern << "' testNamespace='" << testNamespace << "'";
+            if (applyKindFilter) std::cout << " kind='" << symbolKindFilterStr << "'";
+            std::cout << ". Initial queue size=" << queue.size() << " limit=" << BFS_LIMIT << std::endl;
             while (head < queue.size() && queue.size() < BFS_LIMIT)
             {
+                int currentIndex = static_cast<int>(head); // index BEFORE increment will be head
                 QueueItem item = queue[head++];
                 auto sym = reader.getSymbolById(item.symbolId);
                 if (sym.id==0) continue;
+                // Build FQN for logging
+                std::string fqnSym;
+                for (size_t i=0;i<sym.nameHierarchy.nameElements.size();++i) {
+                    if (i) fqnSym += sym.nameHierarchy.nameDelimiter;
+                    fqnSym += sym.nameHierarchy.nameElements[i].name;
+                }
+                // Count incoming references (for logging before expansion)
+                auto incomingPreview = reader.getReferencesToSymbol(sym.id);
+#if LOG
+                std::cout << "[findtests] Pop depth=" << item.depth
+                          << " id=" << sym.id
+                          << " kind=" << (int)sym.symbolKind
+                          << " fqn=" << fqnSym
+                          << " incoming_refs=" << incomingPreview.size()
+                          << " visited=" << visited.size()
+                          << " queue_remaining=" << (queue.size() - head)
+                          << std::endl;
+#endif
                 if (inNamespace(sym))
                 {
-                    auto ensureAddTestClass = [&](int classId){
-                        if (classId > 0 && foundTestSymbolsSet.insert(classId).second) {
-                            foundTestSymbols.push_back(classId);
+                    auto hasFqn = [&](const std::string& fqn) {
+                        return foundTestFqnsSet.find(fqn) != foundTestFqnsSet.end();
+                    };
+                    // Helper to construct FQN from symbol id (cached via local lambda)
+                    auto buildFqnFromId = [&](int sid) -> std::string {
+                        auto sObj = reader.getSymbolById(sid);
+                        if (sObj.id == 0) return std::string();
+                        std::string fqn;
+                        for (size_t i=0;i<sObj.nameHierarchy.nameElements.size();++i) {
+                            if (i) fqn += sObj.nameHierarchy.nameDelimiter;
+                            fqn += sObj.nameHierarchy.nameElements[i].name;
+                        }
+                        return fqn;
+                    };
+                    // Build path (list of symbol ids) from a queue index up to root.
+                    auto buildPathChain = [&](int idx) -> std::vector<int> {
+                        std::vector<int> chain;
+                        while (idx >= 0) {
+                            chain.push_back(queue[idx].symbolId);
+                            idx = queue[idx].parentIndex;
+                        }
+                        std::reverse(chain.begin(), chain.end());
+                        return chain;
+                    };
+                    auto ensureAddTestClass = [&](int classId, const std::string& fqn, const std::vector<int>& extraPathIds = {}){
+                        if (classId <= 0) return;
+                        bool idInserted = foundTestSymbolsSet.insert(classId).second;
+                        bool fqnInserted = foundTestFqnsSet.insert(fqn).second;
+                        if (idInserted && fqnInserted) {
+                            foundTestSymbols.emplace_back(classId, fqn);
+                            // Reconstruct path from one of the starting symbols to this test class.
+                            auto pathIds = buildPathChain(currentIndex);
+                            // In method->class promotion scenario we append extra path ids (e.g. parent class id)
+                            for (int pid : extraPathIds) pathIds.push_back(pid);
+                            // Ensure last element is the classId (in case of direct detection it already is)
+                            if (pathIds.empty() || pathIds.back() != classId) pathIds.push_back(classId);
+                            std::cout << "[findtests]   Added test class id=" << classId << " fqn=" << fqn << std::endl;
+                            std::cout << "[findtests]     Path: ";
+                            bool first = true;
+                            for (int sid : pathIds) {
+                                if (!first) std::cout << " -> ";
+                                first = false;
+                                auto f = buildFqnFromId(sid);
+                                if (f.empty()) std::cout << sid; else std::cout << f;
+                            }
+                            std::cout << std::endl;
                         }
                     };
                     // Helper to check if name looks like test class name
@@ -480,7 +607,7 @@ int main(int argc, const char* argv[])
                         // Direct class/struct detection
                         if ((sym.symbolKind == sourcetrail::SymbolKind::CLASS || sym.symbolKind == sourcetrail::SymbolKind::STRUCT) && isTestClassName(last))
                         {
-                            ensureAddTestClass(sym.id);
+                            ensureAddTestClass(sym.id, fqnSym);
                         }
                         // Method inside a test class: ascend to parent element
                         else if (sym.symbolKind == sourcetrail::SymbolKind::METHOD && sym.nameHierarchy.nameElements.size() >= 2)
@@ -494,35 +621,81 @@ int main(int argc, const char* argv[])
                                     if (i) parentFqn += sym.nameHierarchy.nameDelimiter;
                                     parentFqn += sym.nameHierarchy.nameElements[i].name;
                                 }
-                                auto parentSyms = reader.findSymbolsByQualifiedName(parentFqn);
-                                for (auto &ps : parentSyms) {
-                                    if (ps.symbolKind == sourcetrail::SymbolKind::CLASS || ps.symbolKind == sourcetrail::SymbolKind::STRUCT)
-                                        ensureAddTestClass(ps.id);
+                                if(!hasFqn(parentFqn)) {
+                                        
+                                    auto parentSyms = reader.findSymbolsByQualifiedName(parentFqn, true);
+                                    for (auto &ps : parentSyms) {
+                                        if (ps.symbolKind == sourcetrail::SymbolKind::CLASS || ps.symbolKind == sourcetrail::SymbolKind::STRUCT)
+                                            ensureAddTestClass(ps.id, parentFqn, {ps.id});
+                                    }
+                                }
+                                else
+                                {
+                                    // In this case. we already indexed the test class so we can skip chasing further
+                                    continue;
                                 }
                             }
                         }
                     }
                 }
                 // Expand incoming references (who uses this symbol)
-                auto incoming = reader.getReferencesToSymbol(sym.id);
-                for (const auto& ref : incoming) {
+                size_t enqueuedThisNode = 0;
+                for (const auto& ref : incomingPreview) {
+                    // we need to be more specific about which nodes we queue.
                     int nextId = ref.sourceSymbolId;
-                    if (visited.insert(nextId).second) {
-                        queue.push_back({nextId, item.depth+1});
+                    auto srcSym = reader.getSymbolById(nextId);
+                    // this code is pretty gross. but the idea is. depending on our kind filtering we want to apply
+                    // certain visiting rules to avoid exploding outwards to ALL TYPES
+                    switch (kindFilterValue) {
+                    case sourcetrail::SymbolKind::CLASS:
+                        break;
+                    case sourcetrail::SymbolKind::METHOD:
+                        if( ref.edgeKind == sourcetrail::EdgeKind::MEMBER) {
+                            // skip type usages, type usage references represent a class which owns the method.
+                            continue; 
+                        }
+                        break;
+                    default:
+                        // no filter, enqueue all references
+                        break;
+                    }
+                    bool inserted = visited.insert(nextId).second;
+#if 1 // detailed per-reference debug (toggle to 0 to silence)
+                    // Build FQN of source symbol (caller / user)
+                    std::string srcFqn;
+                    if (srcSym.id) {
+                        for (size_t i = 0; i < srcSym.nameHierarchy.nameElements.size(); ++i) {
+                            if (i) srcFqn += srcSym.nameHierarchy.nameDelimiter;
+                            srcFqn += srcSym.nameHierarchy.nameElements[i].name;
+                        }
+                    }
+                    std::cout << "[findtests]     Incoming ref: "
+                              << (srcFqn.empty() ? std::string("<anon:"+std::to_string(nextId)+">") : srcFqn)
+                              << " --[" << getEdgeKindName(ref.edgeKind) << "]--> "
+                              << (fqnSym.empty() ? std::string("<anon:"+std::to_string(sym.id)+">") : fqnSym)
+                              << " srcKind=" << (srcSym.id ? getSymbolKindName(srcSym.symbolKind) : std::string("<missing>"))
+                              << " action=" << (inserted ? "ENQUEUE" : "SKIP_ALREADY_VISITED")
+                              << std::endl;
+#endif
+                    if (inserted) {
+                        queue.push_back({nextId, item.depth+1, currentIndex});
+                        ++enqueuedThisNode;
                     }
                 }
+#if 1
+                if (enqueuedThisNode) {
+                    std::cout << "[findtests]   Enqueued " << enqueuedThisNode << " new symbols. Queue size now=" << queue.size() << std::endl;
+                }
+#endif
             }
+            std::chrono::steady_clock::time_point endTime = std::chrono::steady_clock::now();
+            std::chrono::duration<double> duration = endTime - startTime;
+            std::cout << "[findtests] BFS duration: " << duration.count() << " seconds." << std::endl;
+            std::cout << "[findtests] BFS done. Total visited=" << visited.size() << " queue_final=" << queue.size() << std::endl;
 
             std::cout << "Traversal explored " << visited.size() << " symbols. Found " << foundTestSymbols.size() << " candidate test symbols." << std::endl;
-            for (int tid : foundTestSymbols) {
-                auto ts = reader.getSymbolById(tid);
-                // Build full qualified name
-                std::string fqn;
-                for (size_t i=0;i<ts.nameHierarchy.nameElements.size();++i) {
-                    if (i) fqn += ts.nameHierarchy.nameDelimiter;
-                    fqn += ts.nameHierarchy.nameElements[i].name;
-                }
-                std::cout << "  Test: " << fqn << " (ID:" << ts.id << ")" << std::endl;
+            for (auto &entry : foundTestSymbols) {
+                std::cout << "  Test: " << entry.second << " (ID:" << entry.first << ")" << std::endl;
             }
             if (queue.size() >= BFS_LIMIT) {
                 std::cerr << "Warning: BFS limit reached (" << BFS_LIMIT << ") results may be incomplete." << std::endl;

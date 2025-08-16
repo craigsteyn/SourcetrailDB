@@ -18,6 +18,7 @@
 
 #include <iostream>
 #include <algorithm>
+#include <set>
 
 #include "DatabaseStorage.h"
 #include "version.h"
@@ -254,10 +255,27 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByName(
         return matchingSymbols;
     }
 
+        // If exactMatch, attempt direct serialized exact lookup first (fast path).
+    if (exactMatch) {
+        std::vector<StorageNode> exactNodes = m_databaseStorage->getNodesBySerializedNameExact(name);
+        std::set<int> addedIds;
+        for (const auto& n : exactNodes) {
+            int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id);
+            if (defKind < 0) continue; // not a symbol
+            if (!addedIds.insert(n.id).second) continue;
+            Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = nodeKindIntToSymbolKind(n.nodeKind); s.definitionKind = static_cast<DefinitionKind>(defKind);
+            // Build FQN to verify (safety)
+            std::string fqn; for (size_t i=0;i<s.nameHierarchy.nameElements.size();++i){ if(i) fqn+=s.nameHierarchy.nameDelimiter; fqn+=s.nameHierarchy.nameElements[i].name; }
+            if (fqn == name) matchingSymbols.push_back(std::move(s));
+        }
+        if (!matchingSymbols.empty()) return matchingSymbols; // success fast path
+        // Fall through to suffix-based search if no exact hit (e.g., prefixes/postfixes present in DB)
+    }
+
     // If the user accidentally passed a qualified pattern, delegate to qualified search.
     if (name.find("::") != std::string::npos)
     {
-        return findSymbolsByQualifiedName(name);
+        return findSymbolsByQualifiedName(name, exactMatch);
     }
 
     try {
@@ -277,7 +295,7 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByName(
 }
 
 
-std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByQualifiedName(const std::string& qualifiedPattern) const
+std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByQualifiedName(const std::string& qualifiedPattern, bool exactMatch) const
 {
 	std::vector<Symbol> matchingSymbols;
 	clearLastError();
@@ -302,25 +320,65 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByQuali
         }
         if (parts.empty()) return matchingSymbols;
 
-        // We only need to query by the last name element (most selective typically) and then post‑filter.
+        // Helper to encode FQN into serialized_name minimal form (empty prefix/postfix per element).
+        auto encodeSerialized = [](const std::vector<std::string>& elems, const std::string& delim) -> std::string {
+            static const std::string META_DELIM = "\tm";
+            static const std::string PART_DELIM = "\ts";
+            static const std::string SIG_DELIM  = "\tp";
+            static const std::string NAME_DELIM = "\tn";
+            std::string out;
+            out.reserve(delim.size() + 4 + elems.size() * 8);
+            out += delim; // store delimiter first
+            out += META_DELIM;
+            for (size_t i=0;i<elems.size();++i) {
+                out += elems[i];
+                out += PART_DELIM; // name -> prefix
+                out += SIG_DELIM;  // empty prefix -> postfix
+                // empty postfix
+                if (i + 1 < elems.size()) out += NAME_DELIM; // separator
+            }
+            return out;
+        };
+
+        // If exactMatch, attempt direct serialized exact lookup first (fast path).
+        if (exactMatch) {
+            // Detect delimiter actually used in input (support '.' or '::').
+            std::string delim = (qualifiedPattern.find("::") != std::string::npos) ? std::string("::") : std::string(".");
+            std::string serializedGuess = encodeSerialized(parts, delim);
+            std::vector<StorageNode> exactNodes = m_databaseStorage->getNodesBySerializedNameExact(serializedGuess);
+            std::set<int> addedIds;
+            for (const auto& n : exactNodes) {
+                int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id);
+                if (defKind < 0) continue; // not a symbol
+                if (!addedIds.insert(n.id).second) continue;
+                Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = nodeKindIntToSymbolKind(n.nodeKind); s.definitionKind = static_cast<DefinitionKind>(defKind);
+                // Build FQN to verify (safety)
+                std::string fqn; for (size_t i=0;i<s.nameHierarchy.nameElements.size();++i){ if(i) fqn+=s.nameHierarchy.nameDelimiter; fqn+=s.nameHierarchy.nameElements[i].name; }
+                if (fqn == qualifiedPattern) matchingSymbols.push_back(std::move(s));
+            }
+            if (!matchingSymbols.empty()) return matchingSymbols; // success fast path
+            // Fall through to suffix-based search if no exact hit (e.g., prefixes/postfixes present in DB)
+        }
+
+        // Fallback / non-exact path: query by tail element and filter.
         const std::string& tail = parts.back();
         std::string likePattern = "%" + tail + "%";
         std::vector<StorageNode> candidateNodes = m_databaseStorage->findSymbolNodesBySerializedNameLike(likePattern);
         for (const auto& n : candidateNodes) {
             Symbol s; s.id=n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = nodeKindIntToSymbolKind(n.nodeKind);
             int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id); if (defKind>=0) s.definitionKind = static_cast<DefinitionKind>(defKind); else s.definitionKind = DefinitionKind::EXPLICIT;
-            // Build FQN
             std::string fqn; fqn.reserve(qualifiedPattern.size()+8);
             for (size_t i = 0; i < s.nameHierarchy.nameElements.size(); ++i) { if (i) fqn += s.nameHierarchy.nameDelimiter; fqn += s.nameHierarchy.nameElements[i].name; }
-            // We consider a match if the FQN ends with the qualified pattern (exact suffix match) OR equals it.
-            if (fqn == qualifiedPattern) { matchingSymbols.push_back(std::move(s)); continue; }
-            if (fqn.size() > qualifiedPattern.size()) {
-                // ensure pattern is suffix boundary-aligned (preceded by delimiter)
-                if (fqn.compare(fqn.size() - qualifiedPattern.size(), qualifiedPattern.size(), qualifiedPattern) == 0) {
-                    // boundary check
-                    size_t prefixLen = fqn.size() - qualifiedPattern.size();
-                    if (prefixLen == 0 || (prefixLen >= s.nameHierarchy.nameDelimiter.size() && fqn.substr(prefixLen - s.nameHierarchy.nameDelimiter.size(), s.nameHierarchy.nameDelimiter.size()) == s.nameHierarchy.nameDelimiter)) {
-                        matchingSymbols.push_back(std::move(s));
+            if (exactMatch) {
+                if (fqn == qualifiedPattern) matchingSymbols.push_back(std::move(s));
+            } else {
+                if (fqn == qualifiedPattern) { matchingSymbols.push_back(std::move(s)); continue; }
+                if (fqn.size() > qualifiedPattern.size()) {
+                    if (fqn.compare(fqn.size() - qualifiedPattern.size(), qualifiedPattern.size(), qualifiedPattern) == 0) {
+                        size_t prefixLen = fqn.size() - qualifiedPattern.size();
+                        if (prefixLen == 0 || (prefixLen >= s.nameHierarchy.nameDelimiter.size() && fqn.substr(prefixLen - s.nameHierarchy.nameDelimiter.size(), s.nameHierarchy.nameDelimiter.size()) == s.nameHierarchy.nameDelimiter)) {
+                            matchingSymbols.push_back(std::move(s));
+                        }
                     }
                 }
             }
@@ -345,7 +403,7 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getAllReference
         // All references (still may be large, future: add pagination). For now we keep previous behavior.
         std::vector<StorageEdge> storageEdges = m_databaseStorage->getAll<StorageEdge>();
         references.reserve(storageEdges.size());
-        for (const auto& e : storageEdges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.referenceKind = static_cast<ReferenceKind>(e.edgeKind); references.push_back(std::move(r)); }
+    for (const auto& e : storageEdges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.edgeKind = intToEdgeKind(e.edgeKind); references.push_back(std::move(r)); }
     } catch (const std::exception& e) { setLastError(std::string("Exception while getting references: ") + e.what()); }
 
     return references;
@@ -362,7 +420,7 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesTo
         return references;
     }
 
-    try { auto edges = m_databaseStorage->getEdgesToNode(symbolId); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.referenceKind = static_cast<ReferenceKind>(e.edgeKind); references.push_back(std::move(r)); } }
+    try { auto edges = m_databaseStorage->getEdgesToNode(symbolId); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.edgeKind = intToEdgeKind(e.edgeKind); references.push_back(std::move(r)); } }
     catch (const std::exception& e) { setLastError(std::string("Exception while getting references to symbol: ") + e.what()); }
 
     return references;
@@ -379,13 +437,13 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesFr
         return references;
     }
 
-    try { auto edges = m_databaseStorage->getEdgesFromNode(symbolId); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.referenceKind = static_cast<ReferenceKind>(e.edgeKind); references.push_back(std::move(r)); } }
+    try { auto edges = m_databaseStorage->getEdgesFromNode(symbolId); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.edgeKind = intToEdgeKind(e.edgeKind); references.push_back(std::move(r)); } }
     catch (const std::exception& e) { setLastError(std::string("Exception while getting references from symbol: ") + e.what()); }
 
     return references;
 }
 
-std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesByType(ReferenceKind referenceKind) const
+std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesByType(EdgeKind edgeKind) const
 {
     std::vector<Reference> references;
     clearLastError();
@@ -396,7 +454,7 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesBy
         return references;
     }
 
-    try { auto edges = m_databaseStorage->getEdgesByType(static_cast<int>(referenceKind)); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.referenceKind = static_cast<ReferenceKind>(e.edgeKind); references.push_back(std::move(r)); } }
+    try { auto edges = m_databaseStorage->getEdgesByType(edgeKindToInt(edgeKind)); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.edgeKind = intToEdgeKind(e.edgeKind); references.push_back(std::move(r)); } }
     catch (const std::exception& e) { setLastError(std::string("Exception while getting references by type: ") + e.what()); }
 
     return references;

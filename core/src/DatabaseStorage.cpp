@@ -17,6 +17,7 @@
 #include "DatabaseStorage.h"
 
 #include <vector>
+#include <iostream>
 
 #include "NodeKind.h"
 #include "SourcetrailException.h"
@@ -1024,8 +1025,26 @@ std::vector<StorageEdge> DatabaseStorage::getEdgesFromNode(int sourceNodeId) con
 
 std::vector<StorageEdge> DatabaseStorage::getEdgesToNode(int targetNodeId) const
 {
-	CppSQLite3Query q = executeQuery("SELECT id, type, source_node_id, target_node_id FROM edge WHERE target_node_id = " + std::to_string(targetNodeId) + ";");
 	std::vector<StorageEdge> edges;
+#if 0
+	// First determine how many rows will be returned so we can reserve capacity.
+	int edgeCount = 0;
+	{
+		CppSQLite3Query cq = executeQuery("SELECT COUNT(*) FROM edge WHERE target_node_id = " + std::to_string(targetNodeId) + ";");
+		if (!cq.eof())
+		{
+			edgeCount = cq.getIntField(0, 0);
+		}
+	}
+
+	// Print the count (basic diagnostic / instrumentation output).
+	std::cout << "[DatabaseStorage] getEdgesToNode targetNodeId=" << targetNodeId << " count=" << edgeCount << std::endl;
+
+
+	edges.reserve(edgeCount);
+#endif
+
+	CppSQLite3Query q = executeQuery("SELECT id, type, source_node_id, target_node_id FROM edge WHERE target_node_id = " + std::to_string(targetNodeId) + ";");
 	while (!q.eof())
 	{
 		const int id = q.getIntField(0, 0);

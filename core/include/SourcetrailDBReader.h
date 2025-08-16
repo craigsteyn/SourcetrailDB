@@ -26,7 +26,7 @@
 #include "ElementComponentKind.h"
 #include "LocationKind.h"
 #include "NameHierarchy.h"
-#include "ReferenceKind.h"
+#include "ReferenceKind.h" // kept for writer-side API elsewhere; reader now uses EdgeKind directly
 #include "SourceRange.h"
 #include "SymbolKind.h"
 
@@ -68,7 +68,7 @@ public:
         int id;
         int sourceSymbolId;
         int targetSymbolId;
-        ReferenceKind referenceKind;
+        EdgeKind edgeKind;               // Previously ReferenceKind referenceKind; now reflects actual stored EdgeKind
         std::vector<SourceRange> locations;
     };
 
@@ -175,14 +175,16 @@ public:
     std::vector<Symbol> findSymbolsByName(const std::string& name, bool exactMatch = false) const;
 
     /**
-     * Find symbols by qualified name pattern (e.g., "MyClass::myFunction")
-     * This method efficiently searches the serialized_name column for qualified patterns
+     * Find symbols by qualified name pattern (e.g., "MyNamespace::MyClass::myFunction")
      *
-     *  param: qualifiedPattern - the qualified name pattern to search for
+     *  param: qualifiedPattern - the qualified name pattern to search for (using the delimiter that the project uses, usually ::)
+     *  param: exactMatch - when true only symbols whose fully qualified name exactly equals qualifiedPattern are returned.
+     *                      when false (default) the previous behavior is kept: return symbols whose fully qualified name ends
+     *                      with qualifiedPattern on a delimiter boundary (suffix match). This allows passing partial tails.
      *
-     *  return: vector of symbols matching the qualified name pattern
+     *  return: vector of symbols matching according to the chosen strategy
      */
-    std::vector<Symbol> findSymbolsByQualifiedName(const std::string& qualifiedPattern) const;
+    std::vector<Symbol> findSymbolsByQualifiedName(const std::string& qualifiedPattern, bool exactMatch = false) const;
 
     /**
      * Get all references/edges from the database
@@ -216,7 +218,7 @@ public:
      *
      *  return: vector of references of the specified type
      */
-    std::vector<Reference> getReferencesByType(ReferenceKind referenceKind) const;
+    std::vector<Reference> getReferencesByType(EdgeKind edgeKind) const; // Updated to EdgeKind
 
     /**
      * Get all files from the database

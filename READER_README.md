@@ -31,7 +31,7 @@ Represents a relationship between symbols with:
 - `id`: Unique identifier
 - `sourceSymbolId`: ID of the source symbol
 - `targetSymbolId`: ID of the target symbol
-- `referenceKind`: Type of reference (call, inheritance, etc.)
+- `edgeKind`: Type of edge/reference (call, inheritance, etc.)
 - `locations`: Source code locations (TODO)
 
 #### `File` Structure
