@@ -25,52 +25,76 @@
 namespace sourcetrail
 {
 
-// Helper function to extract a readable name from the serialized format
-std::string extractReadableName(const std::string& serializedName)
+// Properly deserialize a serialized name hierarchy (mirrors logic from main Sourcetrail app)
+static NameHierarchy parseSerializedNameHierarchy(const std::string& serializedName)
 {
-    // Simple approach: extract sequences of alphanumeric characters and underscores
-    // that are likely to be meaningful names
-    std::vector<std::string> nameComponents;
-    std::string current;
-    
-    for (char c : serializedName)
+    static const std::string META_DELIMITER = "\tm";      // separates delimiter from first element
+    static const std::string NAME_DELIMITER = "\tn";      // separates name elements
+    static const std::string PART_DELIMITER = "\ts";      // separates name from prefix
+    static const std::string SIGNATURE_DELIMITER = "\tp"; // separates prefix from postfix
+
+    NameHierarchy hierarchy;
+
+    // Find meta delimiter to extract the hierarchy delimiter (e.g. "::")
+    size_t mpos = serializedName.find(META_DELIMITER);
+    if (mpos == std::string::npos)
     {
-        if (std::isalnum(c) || c == '_')
+        // Fallback: treat entire string as a single element
+        hierarchy.nameDelimiter = "::";
+        if (!serializedName.empty())
         {
-            current += c;
+            NameElement e;
+            e.name = serializedName; 
+            hierarchy.nameElements.push_back(std::move(e));
+        }
+        return hierarchy;
+    }
+
+    hierarchy.nameDelimiter = serializedName.substr(0, mpos);
+    size_t cursor = mpos + META_DELIMITER.size();
+
+    while (cursor < serializedName.size())
+    {
+        // name up to PART_DELIMITER
+        size_t spos = serializedName.find(PART_DELIMITER, cursor);
+        if (spos == std::string::npos) break; // malformed
+        std::string name = serializedName.substr(cursor, spos - cursor);
+        spos += PART_DELIMITER.size();
+
+        // prefix up to SIGNATURE_DELIMITER
+        size_t ppos = serializedName.find(SIGNATURE_DELIMITER, spos);
+        if (ppos == std::string::npos) break; // malformed
+        std::string prefix = serializedName.substr(spos, ppos - spos);
+        ppos += SIGNATURE_DELIMITER.size();
+
+        // postfix up to NAME_DELIMITER (or end)
+        size_t npos = serializedName.find(NAME_DELIMITER, ppos);
+        std::string postfix;
+        if (npos == std::string::npos)
+        {
+            postfix = serializedName.substr(ppos);
+            cursor = serializedName.size();
         }
         else
         {
-            if (!current.empty() && current.length() > 1)
-            {
-                // Only add components that are longer than 1 character and meaningful
-                if (current != "cpp" && current != "void" && current.find_first_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") != std::string::npos)
-                {
-                    nameComponents.push_back(current);
-                }
-            }
-            current.clear();
+            postfix = serializedName.substr(ppos, npos - ppos);
+            cursor = npos + NAME_DELIMITER.size();
         }
+
+        NameElement element;
+        element.name = std::move(name);
+        element.prefix = std::move(prefix);
+        element.postfix = std::move(postfix);
+        hierarchy.nameElements.push_back(std::move(element));
     }
-    
-    // Add the last component if any
-    if (!current.empty() && current.length() > 1)
+
+    // Fallback: if nothing parsed, keep whole string
+    if (hierarchy.nameElements.empty() && !serializedName.empty())
     {
-        if (current != "cpp" && current != "void" && current.find_first_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz") != std::string::npos)
-        {
-            nameComponents.push_back(current);
-        }
+        NameElement e; e.name = serializedName; hierarchy.nameElements.push_back(std::move(e));
     }
-    
-    // Join meaningful components with ::
-    std::string result;
-    for (size_t i = 0; i < nameComponents.size(); ++i)
-    {
-        if (i > 0) result += "::";
-        result += nameComponents[i];
-    }
-    
-    return result.empty() ? serializedName : result;
+
+    return hierarchy;
 }
 
 SourcetrailDBReader::SourcetrailDBReader()
@@ -167,13 +191,8 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::getAllSymbols() co
             Symbol symbol;
             symbol.id = storageNode.id;
             
-            // Extract a readable name from the serialized format
-            std::string readableName = extractReadableName(storageNode.serializedName);
-            
-            symbol.nameHierarchy.nameDelimiter = "::";
-            NameElement element;
-            element.name = readableName;
-            symbol.nameHierarchy.nameElements.push_back(element);
+            // Properly parse the serialized name hierarchy
+            symbol.nameHierarchy = parseSerializedNameHierarchy(storageNode.serializedName);
             
             symbol.symbolKind = static_cast<SymbolKind>(storageNode.nodeKind);
             symbol.definitionKind = DefinitionKind::EXPLICIT; // Default, would need to be queried separately
