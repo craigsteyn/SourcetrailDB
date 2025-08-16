@@ -21,6 +21,7 @@
 
 #include "DatabaseStorage.h"
 #include "version.h"
+#include "NodeKind.h"
 
 namespace sourcetrail
 {
@@ -95,6 +96,36 @@ static NameHierarchy parseSerializedNameHierarchy(const std::string& serializedN
     }
 
     return hierarchy;
+}
+
+// Convert stored NodeKind bitmask integer to SymbolKind enum (previous code wrongly cast bitmask)
+static SymbolKind nodeKindIntToSymbolKind(int nodeKindInt)
+{
+    using namespace sourcetrail;
+    NodeKind nk = intToNodeKind(nodeKindInt);
+    switch (nk)
+    {
+        case NodeKind::TYPE: return SymbolKind::TYPE;
+        case NodeKind::BUILTIN_TYPE: return SymbolKind::BUILTIN_TYPE;
+        case NodeKind::MODULE: return SymbolKind::MODULE;
+        case NodeKind::NAMESPACE: return SymbolKind::NAMESPACE;
+        case NodeKind::PACKAGE: return SymbolKind::PACKAGE;
+        case NodeKind::STRUCT: return SymbolKind::STRUCT;
+        case NodeKind::CLASS: return SymbolKind::CLASS;
+        case NodeKind::INTERFACE: return SymbolKind::INTERFACE;
+        case NodeKind::ANNOTATION: return SymbolKind::ANNOTATION;
+        case NodeKind::GLOBAL_VARIABLE: return SymbolKind::GLOBAL_VARIABLE;
+        case NodeKind::FIELD: return SymbolKind::FIELD;
+        case NodeKind::FUNCTION: return SymbolKind::FUNCTION;
+        case NodeKind::METHOD: return SymbolKind::METHOD;
+        case NodeKind::ENUM: return SymbolKind::ENUM;
+        case NodeKind::ENUM_CONSTANT: return SymbolKind::ENUM_CONSTANT;
+        case NodeKind::TYPEDEF: return SymbolKind::TYPEDEF;
+        case NodeKind::TYPE_PARAMETER: return SymbolKind::TYPE_PARAMETER;
+        case NodeKind::MACRO: return SymbolKind::MACRO;
+        case NodeKind::UNION: return SymbolKind::UNION;
+        default: return SymbolKind::TYPE; // fallback
+    }
 }
 
 SourcetrailDBReader::SourcetrailDBReader()
@@ -179,7 +210,7 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::getAllSymbols() co
         // targeted: only fetch nodes that are actually symbols via helper
         std::vector<StorageNode> storageNodes = m_databaseStorage->getAllSymbolNodes();
         for (const auto& n : storageNodes) {
-            Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = static_cast<SymbolKind>(n.nodeKind);
+            Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = nodeKindIntToSymbolKind(n.nodeKind);
             int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id); if (defKind >= 0) s.definitionKind = static_cast<DefinitionKind>(defKind); else s.definitionKind = DefinitionKind::EXPLICIT; symbols.push_back(std::move(s));
         }
     } catch (const std::exception& e) { setLastError(std::string("Exception while getting symbols: ") + e.what()); }
@@ -204,7 +235,7 @@ SourcetrailDBReader::Symbol SourcetrailDBReader::getSymbolById(int symbolId) con
             // ensure it's actually a symbol
             int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id);
             if (defKind >= 0) {
-                symbol.id = n.id; symbol.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); symbol.symbolKind = static_cast<SymbolKind>(n.nodeKind); symbol.definitionKind = static_cast<DefinitionKind>(defKind);
+                symbol.id = n.id; symbol.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); symbol.symbolKind = nodeKindIntToSymbolKind(n.nodeKind); symbol.definitionKind = static_cast<DefinitionKind>(defKind);
             } else { setLastError("Id " + std::to_string(symbolId) + " is not a symbol"); }
         } else { setLastError("Symbol with ID " + std::to_string(symbolId) + " not found"); }
     } catch (const std::exception& e) { setLastError(std::string("Exception while getting symbol by ID: ") + e.what()); }
@@ -223,13 +254,19 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByName(
         return matchingSymbols;
     }
 
+    // If the user accidentally passed a qualified pattern, delegate to qualified search.
+    if (name.find("::") != std::string::npos)
+    {
+        return findSymbolsByQualifiedName(name);
+    }
+
     try {
         // The serialized_name column contains the full hierarchy encoding; for quick filtering we can pattern match.
         // We use LIKE with %name% as heuristic and post-filter exact element name when needed.
         std::string likePattern = "%" + name + "%";
         std::vector<StorageNode> candidateNodes = m_databaseStorage->findSymbolNodesBySerializedNameLike(likePattern);
         for (const auto& n : candidateNodes) {
-            Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = static_cast<SymbolKind>(n.nodeKind); int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id); if (defKind >= 0) s.definitionKind = static_cast<DefinitionKind>(defKind); else s.definitionKind = DefinitionKind::EXPLICIT; 
+            Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = nodeKindIntToSymbolKind(n.nodeKind); int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id); if (defKind >= 0) s.definitionKind = static_cast<DefinitionKind>(defKind); else s.definitionKind = DefinitionKind::EXPLICIT; 
             std::string finalName = s.nameHierarchy.nameElements.empty()? std::string() : s.nameHierarchy.nameElements.back().name;
             bool match = exactMatch ? (finalName == name) : (finalName.find(name) != std::string::npos);
             if (match) matchingSymbols.push_back(std::move(s));
@@ -237,6 +274,60 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByName(
     } catch (const std::exception& e) { setLastError(std::string("Exception while searching symbols by name: ") + e.what()); }
 
     return matchingSymbols;
+}
+
+
+std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByQualifiedName(const std::string& qualifiedPattern) const
+{
+	std::vector<Symbol> matchingSymbols;
+	clearLastError();
+
+	if (!isOpen())
+	{
+		setLastError("Database is not open");
+		return matchingSymbols;
+	}
+
+    try {
+        // Split the qualified pattern into its components.
+        std::vector<std::string> parts; parts.reserve(8);
+        {
+            std::string tmp; tmp.reserve(qualifiedPattern.size());
+            for (size_t i=0;i<qualifiedPattern.size();) {
+                size_t pos = qualifiedPattern.find("::", i);
+                if (pos == std::string::npos) { parts.push_back(qualifiedPattern.substr(i)); break; }
+                parts.push_back(qualifiedPattern.substr(i, pos-i));
+                i = pos + 2;
+            }
+        }
+        if (parts.empty()) return matchingSymbols;
+
+        // We only need to query by the last name element (most selective typically) and then post‑filter.
+        const std::string& tail = parts.back();
+        std::string likePattern = "%" + tail + "%";
+        std::vector<StorageNode> candidateNodes = m_databaseStorage->findSymbolNodesBySerializedNameLike(likePattern);
+        for (const auto& n : candidateNodes) {
+            Symbol s; s.id=n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = nodeKindIntToSymbolKind(n.nodeKind);
+            int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id); if (defKind>=0) s.definitionKind = static_cast<DefinitionKind>(defKind); else s.definitionKind = DefinitionKind::EXPLICIT;
+            // Build FQN
+            std::string fqn; fqn.reserve(qualifiedPattern.size()+8);
+            for (size_t i = 0; i < s.nameHierarchy.nameElements.size(); ++i) { if (i) fqn += s.nameHierarchy.nameDelimiter; fqn += s.nameHierarchy.nameElements[i].name; }
+            // We consider a match if the FQN ends with the qualified pattern (exact suffix match) OR equals it.
+            if (fqn == qualifiedPattern) { matchingSymbols.push_back(std::move(s)); continue; }
+            if (fqn.size() > qualifiedPattern.size()) {
+                // ensure pattern is suffix boundary-aligned (preceded by delimiter)
+                if (fqn.compare(fqn.size() - qualifiedPattern.size(), qualifiedPattern.size(), qualifiedPattern) == 0) {
+                    // boundary check
+                    size_t prefixLen = fqn.size() - qualifiedPattern.size();
+                    if (prefixLen == 0 || (prefixLen >= s.nameHierarchy.nameDelimiter.size() && fqn.substr(prefixLen - s.nameHierarchy.nameDelimiter.size(), s.nameHierarchy.nameDelimiter.size()) == s.nameHierarchy.nameDelimiter)) {
+                        matchingSymbols.push_back(std::move(s));
+                    }
+                }
+            }
+        }
+    } catch (const std::exception& e) { setLastError(std::string("Exception while searching symbols by qualified name: ") + e.what()); }
+
+	return matchingSymbols;
 }
 
 std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getAllReferences() const

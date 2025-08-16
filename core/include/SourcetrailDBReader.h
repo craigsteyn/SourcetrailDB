@@ -175,6 +175,16 @@ public:
     std::vector<Symbol> findSymbolsByName(const std::string& name, bool exactMatch = false) const;
 
     /**
+     * Find symbols by qualified name pattern (e.g., "MyClass::myFunction")
+     * This method efficiently searches the serialized_name column for qualified patterns
+     *
+     *  param: qualifiedPattern - the qualified name pattern to search for
+     *
+     *  return: vector of symbols matching the qualified name pattern
+     */
+    std::vector<Symbol> findSymbolsByQualifiedName(const std::string& qualifiedPattern) const;
+
+    /**
      * Get all references/edges from the database
      *
      *  return: vector of all references in the database

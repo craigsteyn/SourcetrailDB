@@ -21,6 +21,7 @@ void printUsage()
     std::cout << "  graph <symbol>   - Show bidirectional dependency graph" << std::endl;
     std::cout << "  stats            - Show database statistics" << std::endl;
     std::cout << "  list             - List all symbols by kind" << std::endl;
+    std::cout << "  findtests <symbol> <test_namespace> - Find test classes in namespace that depend (directly or indirectly) on the symbol" << std::endl;
 }
 
 // Get a readable name from a symbol
@@ -84,7 +85,9 @@ std::string getReferenceKindName(sourcetrail::ReferenceKind kind)
 // Show dependencies of a symbol (what it references)
 void showDependencies(sourcetrail::SourcetrailDBReader& reader, const std::string& symbolName)
 {
-    auto symbols = reader.findSymbolsByName(symbolName, false);
+    auto symbols = (symbolName.find("::") != std::string::npos) ? 
+        reader.findSymbolsByQualifiedName(symbolName) : 
+        reader.findSymbolsByName(symbolName, false);
     
     if (symbols.empty())
     {
@@ -138,7 +141,9 @@ void showDependencies(sourcetrail::SourcetrailDBReader& reader, const std::strin
 // Show references to a symbol (what references it)
 void showReferences(sourcetrail::SourcetrailDBReader& reader, const std::string& symbolName)
 {
-    auto symbols = reader.findSymbolsByName(symbolName, false);
+    auto symbols = (symbolName.find("::") != std::string::npos) ? 
+        reader.findSymbolsByQualifiedName(symbolName) : 
+        reader.findSymbolsByName(symbolName, false);
     
     if (symbols.empty())
     {
@@ -338,7 +343,7 @@ int main(int argc, const char* argv[])
         {
             listSymbols(reader);
         }
-        else if (command == "deps" || command == "refs" || command == "graph")
+    else if (command == "deps" || command == "refs" || command == "graph")
         {
             if (argc < 4)
             {
@@ -359,6 +364,168 @@ int main(int argc, const char* argv[])
             else if (command == "graph")
             {
                 showGraph(reader, symbolName);
+            }
+        }
+        else if (command == "findtests")
+        {
+            if (argc < 5)
+            {
+                std::cerr << "Error: findtests requires <symbol_name> <test_namespace_pattern>" << std::endl;
+                return 1;
+            }
+            std::string symbolPattern = argv[3];
+            std::string testNamespace = argv[4]; // e.g. "UnitTests" or "My::UnitTests"
+
+            // Support both unqualified and qualified symbol lookup. If the pattern contains
+            // a scope operator we try qualified lookup first. Otherwise use name lookup.
+            std::vector<sourcetrail::SourcetrailDBReader::Symbol> startSymbols;
+            if (symbolPattern.find("::") != std::string::npos) {
+                startSymbols = reader.findSymbolsByQualifiedName(symbolPattern);
+                if (startSymbols.empty()) {
+                    // fallback: try tail element unqualified
+                    auto pos = symbolPattern.rfind("::");
+                    if (pos != std::string::npos && pos+2 < symbolPattern.size()) {
+                        auto tail = symbolPattern.substr(pos+2);
+                        auto tailSyms = reader.findSymbolsByName(tail, true);
+                        startSymbols.insert(startSymbols.end(), tailSyms.begin(), tailSyms.end());
+                    }
+                }
+            } else {
+                startSymbols = reader.findSymbolsByName(symbolPattern, false);
+            }
+
+            // De-duplicate startSymbols by id (possible if both lookups returned same symbols)
+            {
+                std::set<int> seen;
+                std::vector<sourcetrail::SourcetrailDBReader::Symbol> unique;
+                unique.reserve(startSymbols.size());
+                for (auto &s : startSymbols)
+                {
+                    if (seen.insert(s.id).second) unique.push_back(s);
+                }
+                startSymbols.swap(unique);
+            }
+            if (startSymbols.empty())
+            {
+                std::cerr << "No starting symbols found for pattern: " << symbolPattern << std::endl;
+                return 1;
+            }
+
+            // Diagnostics: list starting symbols with full qualified names.
+            std::cout << "Resolved starting symbols (" << startSymbols.size() << "):" << std::endl;
+            for (auto &s : startSymbols) {
+                std::string fqn;
+                for (size_t i=0;i<s.nameHierarchy.nameElements.size();++i) {
+                    if (i) fqn += s.nameHierarchy.nameDelimiter;
+                    fqn += s.nameHierarchy.nameElements[i].name;
+                }
+                std::cout << "  ID=" << s.id << "  FQN=" << fqn << "  Kind=" << (int)s.symbolKind << std::endl;
+            }
+
+            // BFS traversal collecting reachable test classes in namespace
+            // Strategy: Walk incoming references (who depends on the current symbol) because
+            // we want classes/tests that use the implementation under test. We stop when we reach
+            // symbols whose fully qualified hierarchy starts with the given namespace delimiter.
+            struct QueueItem { int symbolId; int depth; };
+            std::set<int> visited;
+            std::vector<int> foundTestSymbols;
+            std::set<int> foundTestSymbolsSet; // for uniqueness
+            std::vector<QueueItem> queue;
+            queue.reserve(1024);
+            for (auto& s : startSymbols) { queue.push_back({s.id,0}); visited.insert(s.id); }
+
+            auto inNamespace = [&testNamespace](const sourcetrail::SourcetrailDBReader::Symbol& sym) -> bool {
+                // Serialize hierarchy into a FQN using nameDelimiter
+                std::string fqn;
+                for (size_t i=0;i<sym.nameHierarchy.nameElements.size();++i) {
+                    if (i) fqn += sym.nameHierarchy.nameDelimiter;
+                    fqn += sym.nameHierarchy.nameElements[i].name;
+                }
+                // Check if symbol is within the test namespace (but not the namespace itself)
+                // Look for testNamespace as a parent element, not the final element
+                if (sym.nameHierarchy.nameElements.size() > 1) {
+                    for (size_t i = 0; i < sym.nameHierarchy.nameElements.size() - 1; ++i) {
+                        if (sym.nameHierarchy.nameElements[i].name == testNamespace) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+
+            size_t head = 0; // manual queue for performance
+            const size_t BFS_LIMIT = 100000; // safety cap
+            while (head < queue.size() && queue.size() < BFS_LIMIT)
+            {
+                QueueItem item = queue[head++];
+                auto sym = reader.getSymbolById(item.symbolId);
+                if (sym.id==0) continue;
+                if (inNamespace(sym))
+                {
+                    auto ensureAddTestClass = [&](int classId){
+                        if (classId > 0 && foundTestSymbolsSet.insert(classId).second) {
+                            foundTestSymbols.push_back(classId);
+                        }
+                    };
+                    // Helper to check if name looks like test class name
+                    auto isTestClassName = [](const std::string& n){
+                        if (n.size() >= 4 && n.compare(n.size()-4, 4, "Test") == 0) return true;
+                        if (n.size() >= 5 && n.compare(n.size()-5, 5, "Tests") == 0) return true;
+                        return false;
+                    };
+
+                    if (!sym.nameHierarchy.nameElements.empty())
+                    {
+                        const std::string last = sym.nameHierarchy.nameElements.back().name;
+                        // Direct class/struct detection
+                        if ((sym.symbolKind == sourcetrail::SymbolKind::CLASS || sym.symbolKind == sourcetrail::SymbolKind::STRUCT) && isTestClassName(last))
+                        {
+                            ensureAddTestClass(sym.id);
+                        }
+                        // Method inside a test class: ascend to parent element
+                        else if (sym.symbolKind == sourcetrail::SymbolKind::METHOD && sym.nameHierarchy.nameElements.size() >= 2)
+                        {
+                            const std::string parentName = sym.nameHierarchy.nameElements[sym.nameHierarchy.nameElements.size()-2].name;
+                            if (isTestClassName(parentName))
+                            {
+                                // Build parent FQN
+                                std::string parentFqn;
+                                for (size_t i=0;i<sym.nameHierarchy.nameElements.size()-1;++i) {
+                                    if (i) parentFqn += sym.nameHierarchy.nameDelimiter;
+                                    parentFqn += sym.nameHierarchy.nameElements[i].name;
+                                }
+                                auto parentSyms = reader.findSymbolsByQualifiedName(parentFqn);
+                                for (auto &ps : parentSyms) {
+                                    if (ps.symbolKind == sourcetrail::SymbolKind::CLASS || ps.symbolKind == sourcetrail::SymbolKind::STRUCT)
+                                        ensureAddTestClass(ps.id);
+                                }
+                            }
+                        }
+                    }
+                }
+                // Expand incoming references (who uses this symbol)
+                auto incoming = reader.getReferencesToSymbol(sym.id);
+                for (const auto& ref : incoming) {
+                    int nextId = ref.sourceSymbolId;
+                    if (visited.insert(nextId).second) {
+                        queue.push_back({nextId, item.depth+1});
+                    }
+                }
+            }
+
+            std::cout << "Traversal explored " << visited.size() << " symbols. Found " << foundTestSymbols.size() << " candidate test symbols." << std::endl;
+            for (int tid : foundTestSymbols) {
+                auto ts = reader.getSymbolById(tid);
+                // Build full qualified name
+                std::string fqn;
+                for (size_t i=0;i<ts.nameHierarchy.nameElements.size();++i) {
+                    if (i) fqn += ts.nameHierarchy.nameDelimiter;
+                    fqn += ts.nameHierarchy.nameElements[i].name;
+                }
+                std::cout << "  Test: " << fqn << " (ID:" << ts.id << ")" << std::endl;
+            }
+            if (queue.size() >= BFS_LIMIT) {
+                std::cerr << "Warning: BFS limit reached (" << BFS_LIMIT << ") results may be incomplete." << std::endl;
             }
         }
         else
