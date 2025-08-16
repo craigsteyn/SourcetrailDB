@@ -100,6 +100,8 @@ endif()
 if (BUILD_EXAMPLES)
 	message(STATUS "The examples will be built.")
 	add_subdirectory("${CMAKE_SOURCE_DIR}/examples/cpp_api_example")
+	add_subdirectory("${CMAKE_SOURCE_DIR}/examples/cpp_reader_example")
+	add_subdirectory("${CMAKE_SOURCE_DIR}/examples/dependency_analyzer")
 	add_subdirectory("${CMAKE_SOURCE_DIR}/examples/cpp_poetry_indexer")
 
 	if (BUILD_BINDINGS_PYTHON)
