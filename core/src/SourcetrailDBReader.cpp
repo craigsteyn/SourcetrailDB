@@ -174,40 +174,15 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::getAllSymbols() co
 {
     std::vector<Symbol> symbols;
     clearLastError();
-
-    if (!isOpen())
-    {
-        setLastError("Database is not open");
-        return symbols;
-    }
-
-    try
-    {
-        // Get all nodes (symbols) from the database
-        std::vector<StorageNode> storageNodes = m_databaseStorage->getAll<StorageNode>();
-        
-        for (const auto& storageNode : storageNodes)
-        {
-            Symbol symbol;
-            symbol.id = storageNode.id;
-            
-            // Properly parse the serialized name hierarchy
-            symbol.nameHierarchy = parseSerializedNameHierarchy(storageNode.serializedName);
-            
-            symbol.symbolKind = static_cast<SymbolKind>(storageNode.nodeKind);
-            symbol.definitionKind = DefinitionKind::EXPLICIT; // Default, would need to be queried separately
-            
-            // TODO: Get source locations for this symbol
-            // symbol.locations = getSourceLocationsForSymbol(symbol.id);
-            
-            symbols.push_back(symbol);
+    if (!isOpen()) { setLastError("Database is not open"); return symbols; }
+    try {
+        // targeted: only fetch nodes that are actually symbols via helper
+        std::vector<StorageNode> storageNodes = m_databaseStorage->getAllSymbolNodes();
+        for (const auto& n : storageNodes) {
+            Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = static_cast<SymbolKind>(n.nodeKind);
+            int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id); if (defKind >= 0) s.definitionKind = static_cast<DefinitionKind>(defKind); else s.definitionKind = DefinitionKind::EXPLICIT; symbols.push_back(std::move(s));
         }
-    }
-    catch (const std::exception& e)
-    {
-        setLastError(std::string("Exception while getting symbols: ") + e.what());
-    }
-
+    } catch (const std::exception& e) { setLastError(std::string("Exception while getting symbols: ") + e.what()); }
     return symbols;
 }
 
@@ -223,27 +198,16 @@ SourcetrailDBReader::Symbol SourcetrailDBReader::getSymbolById(int symbolId) con
         return symbol;
     }
 
-    try
-    {
-        // This would need to be implemented in DatabaseStorage or we need direct SQL access
-        // For now, we'll search through all symbols
-        auto symbols = getAllSymbols();
-        auto it = std::find_if(symbols.begin(), symbols.end(), 
-                              [symbolId](const Symbol& s) { return s.id == symbolId; });
-        
-        if (it != symbols.end())
-        {
-            symbol = *it;
-        }
-        else
-        {
-            setLastError("Symbol with ID " + std::to_string(symbolId) + " not found");
-        }
-    }
-    catch (const std::exception& e)
-    {
-        setLastError(std::string("Exception while getting symbol by ID: ") + e.what());
-    }
+    try {
+        StorageNode n = m_databaseStorage->getNodeById(symbolId);
+        if (n.id != 0) {
+            // ensure it's actually a symbol
+            int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id);
+            if (defKind >= 0) {
+                symbol.id = n.id; symbol.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); symbol.symbolKind = static_cast<SymbolKind>(n.nodeKind); symbol.definitionKind = static_cast<DefinitionKind>(defKind);
+            } else { setLastError("Id " + std::to_string(symbolId) + " is not a symbol"); }
+        } else { setLastError("Symbol with ID " + std::to_string(symbolId) + " not found"); }
+    } catch (const std::exception& e) { setLastError(std::string("Exception while getting symbol by ID: ") + e.what()); }
 
     return symbol;
 }
@@ -259,39 +223,18 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::findSymbolsByName(
         return matchingSymbols;
     }
 
-    try
-    {
-        auto allSymbols = getAllSymbols();
-        
-        for (const auto& symbol : allSymbols)
-        {
-            // Extract the actual name from the NameHierarchy
-            std::string symbolName;
-            if (!symbol.nameHierarchy.nameElements.empty())
-            {
-                symbolName = symbol.nameHierarchy.nameElements.back().name;
-            }
-            
-            bool matches = false;
-            if (exactMatch)
-            {
-                matches = (symbolName == name);
-            }
-            else
-            {
-                matches = (symbolName.find(name) != std::string::npos);
-            }
-            
-            if (matches)
-            {
-                matchingSymbols.push_back(symbol);
-            }
+    try {
+        // The serialized_name column contains the full hierarchy encoding; for quick filtering we can pattern match.
+        // We use LIKE with %name% as heuristic and post-filter exact element name when needed.
+        std::string likePattern = "%" + name + "%";
+        std::vector<StorageNode> candidateNodes = m_databaseStorage->findSymbolNodesBySerializedNameLike(likePattern);
+        for (const auto& n : candidateNodes) {
+            Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = static_cast<SymbolKind>(n.nodeKind); int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id); if (defKind >= 0) s.definitionKind = static_cast<DefinitionKind>(defKind); else s.definitionKind = DefinitionKind::EXPLICIT; 
+            std::string finalName = s.nameHierarchy.nameElements.empty()? std::string() : s.nameHierarchy.nameElements.back().name;
+            bool match = exactMatch ? (finalName == name) : (finalName.find(name) != std::string::npos);
+            if (match) matchingSymbols.push_back(std::move(s));
         }
-    }
-    catch (const std::exception& e)
-    {
-        setLastError(std::string("Exception while searching symbols by name: ") + e.what());
-    }
+    } catch (const std::exception& e) { setLastError(std::string("Exception while searching symbols by name: ") + e.what()); }
 
     return matchingSymbols;
 }
@@ -307,29 +250,12 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getAllReference
         return references;
     }
 
-    try
-    {
-        // Get all edges (references) from the database
+    try {
+        // All references (still may be large, future: add pagination). For now we keep previous behavior.
         std::vector<StorageEdge> storageEdges = m_databaseStorage->getAll<StorageEdge>();
-        
-        for (const auto& storageEdge : storageEdges)
-        {
-            Reference reference;
-            reference.id = storageEdge.id;
-            reference.sourceSymbolId = storageEdge.sourceNodeId;
-            reference.targetSymbolId = storageEdge.targetNodeId;
-            reference.referenceKind = static_cast<ReferenceKind>(storageEdge.edgeKind);
-            
-            // TODO: Get source locations for this reference
-            // reference.locations = getSourceLocationsForReference(reference.id);
-            
-            references.push_back(reference);
-        }
-    }
-    catch (const std::exception& e)
-    {
-        setLastError(std::string("Exception while getting references: ") + e.what());
-    }
+        references.reserve(storageEdges.size());
+        for (const auto& e : storageEdges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.referenceKind = static_cast<ReferenceKind>(e.edgeKind); references.push_back(std::move(r)); }
+    } catch (const std::exception& e) { setLastError(std::string("Exception while getting references: ") + e.what()); }
 
     return references;
 }
@@ -345,22 +271,8 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesTo
         return references;
     }
 
-    try
-    {
-        auto allReferences = getAllReferences();
-        
-        for (const auto& reference : allReferences)
-        {
-            if (reference.targetSymbolId == symbolId)
-            {
-                references.push_back(reference);
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-        setLastError(std::string("Exception while getting references to symbol: ") + e.what());
-    }
+    try { auto edges = m_databaseStorage->getEdgesToNode(symbolId); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.referenceKind = static_cast<ReferenceKind>(e.edgeKind); references.push_back(std::move(r)); } }
+    catch (const std::exception& e) { setLastError(std::string("Exception while getting references to symbol: ") + e.what()); }
 
     return references;
 }
@@ -376,22 +288,8 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesFr
         return references;
     }
 
-    try
-    {
-        auto allReferences = getAllReferences();
-        
-        for (const auto& reference : allReferences)
-        {
-            if (reference.sourceSymbolId == symbolId)
-            {
-                references.push_back(reference);
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-        setLastError(std::string("Exception while getting references from symbol: ") + e.what());
-    }
+    try { auto edges = m_databaseStorage->getEdgesFromNode(symbolId); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.referenceKind = static_cast<ReferenceKind>(e.edgeKind); references.push_back(std::move(r)); } }
+    catch (const std::exception& e) { setLastError(std::string("Exception while getting references from symbol: ") + e.what()); }
 
     return references;
 }
@@ -407,22 +305,8 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesBy
         return references;
     }
 
-    try
-    {
-        auto allReferences = getAllReferences();
-        
-        for (const auto& reference : allReferences)
-        {
-            if (reference.referenceKind == referenceKind)
-            {
-                references.push_back(reference);
-            }
-        }
-    }
-    catch (const std::exception& e)
-    {
-        setLastError(std::string("Exception while getting references by type: ") + e.what());
-    }
+    try { auto edges = m_databaseStorage->getEdgesByType(static_cast<int>(referenceKind)); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.referenceKind = static_cast<ReferenceKind>(e.edgeKind); references.push_back(std::move(r)); } }
+    catch (const std::exception& e) { setLastError(std::string("Exception while getting references by type: ") + e.what()); }
 
     return references;
 }
@@ -438,27 +322,8 @@ std::vector<SourcetrailDBReader::File> SourcetrailDBReader::getAllFiles() const
         return files;
     }
 
-    try
-    {
-        // Get all files from the database
-        std::vector<StorageFile> storageFiles = m_databaseStorage->getAll<StorageFile>();
-        
-        for (const auto& storageFile : storageFiles)
-        {
-            File file;
-            file.id = storageFile.id;
-            file.filePath = storageFile.filePath;
-            file.language = storageFile.languageIdentifier;
-            file.indexed = storageFile.indexed;
-            file.complete = storageFile.complete;
-            
-            files.push_back(file);
-        }
-    }
-    catch (const std::exception& e)
-    {
-        setLastError(std::string("Exception while getting files: ") + e.what());
-    }
+    try { auto storageFiles = m_databaseStorage->getAll<StorageFile>(); files.reserve(storageFiles.size()); for (const auto& sf: storageFiles) { File f; f.id=sf.id; f.filePath=sf.filePath; f.language=sf.languageIdentifier; f.indexed=sf.indexed; f.complete=sf.complete; files.push_back(std::move(f)); } }
+    catch (const std::exception& e) { setLastError(std::string("Exception while getting files: ") + e.what()); }
 
     return files;
 }

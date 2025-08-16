@@ -75,6 +75,20 @@ public:
 	void setNodeType(int nodeId, int nodeKind);
 	void setFileLanguage(int fileId, const std::string& languageIdentifier);
 
+	// Efficient targeted read helpers (added for SourcetrailDBReader)
+	std::vector<StorageNode> getNodesBySerializedNameExact(const std::string& serializedName) const;
+	std::vector<StorageNode> getNodesBySerializedNameLike(const std::string& pattern) const; // SQL LIKE pattern
+	StorageNode getNodeById(int nodeId) const; // id==0 if not found
+	int getDefinitionKindForSymbol(int symbolId) const; // -1 if not a symbol
+	std::vector<StorageEdge> getEdgesFromNode(int sourceNodeId) const;
+	std::vector<StorageEdge> getEdgesToNode(int targetNodeId) const;
+	std::vector<StorageEdge> getEdgesByType(int edgeKind) const;
+	std::vector<StorageEdge> getEdgesFromNodeOfKinds(int sourceNodeId, const std::vector<int>& kinds) const;
+
+	// Symbol specific helpers
+	std::vector<StorageNode> getAllSymbolNodes() const; // nodes that have an entry in symbol table
+	std::vector<StorageNode> findSymbolNodesBySerializedNameLike(const std::string& pattern) const; // pattern: SQL LIKE
+
 	template <typename ResultType>
 	std::vector<ResultType> getAll() const
 	{
