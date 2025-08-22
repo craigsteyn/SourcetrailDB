@@ -650,6 +650,30 @@ bool SourcetrailDBWriter::recordError(const std::string& message, bool fatal, co
 	}
 }
 
+bool SourcetrailDBWriter::recordTestMapping(int symbolId, int testSymbolId)
+{
+	if (!m_storage)
+	{
+		m_lastError = "Unable to record test mapping, because no database is currently open.";
+		return false;
+	}
+	if (!symbolId || !testSymbolId)
+	{
+		m_lastError = "Unable to record test mapping, invalid ids.";
+		return false;
+	}
+	try
+	{
+		m_storage->addTestMapping(symbolId, testSymbolId);
+		return true;
+	}
+	catch (const SourcetrailException e)
+	{
+		m_lastError = e.getMessage();
+		return false;
+	}
+}
+
 // --- Private Interface ---
 
 void SourcetrailDBWriter::openDatabase()

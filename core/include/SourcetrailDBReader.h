@@ -210,6 +210,8 @@ public:
      *  return: vector of references originating from the symbol
      */
     std::vector<Reference> getReferencesFromSymbol(int symbolId) const;
+    std::vector<Reference> getReferencesFromSymbolWithKind(int symbolId, sourcetrail::EdgeKind kind) const;
+
 
     /**
      * Get references of a specific type

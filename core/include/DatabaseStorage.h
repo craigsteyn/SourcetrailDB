@@ -72,6 +72,9 @@ public:
 	void addOccurrence(const StorageOccurrence& storageOccurrence);
 	int addError(const StorageErrorData& storageErrorData);
 
+	// Tests mapping table (symbol -> test symbol)
+	int addTestMapping(int symbolId, int testSymbolId);
+
 	void setNodeType(int nodeId, int nodeKind);
 	void setFileLanguage(int fileId, const std::string& languageIdentifier);
 
@@ -137,6 +140,9 @@ private:
 	CppSQLite3Statement m_findErrorStatement;
 	CppSQLite3Statement m_insertErrorStatement;
 	CppSQLite3Statement m_insertOrUpdateMetaValueStmt;
+
+	// Prepared statement for tests mapping table
+	CppSQLite3Statement m_insertTestMappingStmt;
 };
 
 template <>

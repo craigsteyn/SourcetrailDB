@@ -510,6 +510,15 @@ void DatabaseStorage::setupTables()
 		"	PRIMARY KEY(id), "
 		"	FOREIGN KEY(id) REFERENCES element(id) ON DELETE CASCADE"
 		");");
+
+	executeStatement(
+		"CREATE TABLE IF NOT EXISTS tests("
+		"	symbol_id INTEGER NOT NULL, "
+		"	test_symbol_id INTEGER NOT NULL, "
+		"	PRIMARY KEY(symbol_id, test_symbol_id), "
+		"	FOREIGN KEY(symbol_id) REFERENCES node(id) ON DELETE CASCADE, "
+		"	FOREIGN KEY(test_symbol_id) REFERENCES node(id) ON DELETE CASCADE"
+		");");
 }
 
 void DatabaseStorage::clearTables()
@@ -526,7 +535,8 @@ void DatabaseStorage::clearTables()
 		"symbol",
 		"node",
 		"edge",
-		"element_component"
+		"element_component",
+		"tests",
 		"element"};
 
 	for (const std::string& tableName: tableNames)
@@ -548,6 +558,10 @@ void DatabaseStorage::setupIndices()
 		"ON source_location(file_node_id, start_line, start_column, end_line, end_column, type);");
 
 	executeStatement("CREATE INDEX IF NOT EXISTS error_all_data_index ON error(message, fatal);");
+
+	// Indices for tests mapping
+	executeStatement("CREATE INDEX IF NOT EXISTS tests_symbol_index ON tests(symbol_id);");
+	executeStatement("CREATE INDEX IF NOT EXISTS tests_test_symbol_index ON tests(test_symbol_id);");
 }
 
 void DatabaseStorage::setupPrecompiledStatements()
@@ -613,6 +627,9 @@ void DatabaseStorage::setupPrecompiledStatements()
 		"INSERT OR REPLACE INTO meta(id, key, value) VALUES("
 		"(SELECT id FROM meta WHERE key = ?), ?, ?"
 		");");
+
+	// Prepared insert for tests mapping
+	m_insertTestMappingStmt = compileStatement("INSERT OR IGNORE INTO tests(symbol_id, test_symbol_id) VALUES(?, ?);");
 }
 
 void DatabaseStorage::clearPrecompiledStatements()
@@ -637,6 +654,7 @@ void DatabaseStorage::clearPrecompiledStatements()
 	m_findErrorStatement.finalize();
 	m_insertErrorStatement.finalize();
 	m_insertOrUpdateMetaValueStmt.finalize();
+	m_insertTestMappingStmt.finalize();
 }
 
 int DatabaseStorage::insertElement()
@@ -654,6 +672,15 @@ void DatabaseStorage::insertOrUpdateMetaValue(const std::string& key, const std:
 	m_insertOrUpdateMetaValueStmt.bind(3, value.c_str());
 	executeStatement(m_insertOrUpdateMetaValueStmt);
 	m_insertOrUpdateMetaValueStmt.reset();
+}
+
+int DatabaseStorage::addTestMapping(int symbolId, int testSymbolId)
+{
+	m_insertTestMappingStmt.bind(1, symbolId);
+	m_insertTestMappingStmt.bind(2, testSymbolId);
+	executeStatement(m_insertTestMappingStmt);
+	m_insertTestMappingStmt.reset();
+	return 1;
 }
 
 CppSQLite3Statement DatabaseStorage::compileStatement(const std::string& statement) const

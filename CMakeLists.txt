@@ -103,6 +103,7 @@ if (BUILD_EXAMPLES)
 	add_subdirectory("${CMAKE_SOURCE_DIR}/examples/cpp_reader_example")
 	add_subdirectory("${CMAKE_SOURCE_DIR}/examples/dependency_analyzer")
 	add_subdirectory("${CMAKE_SOURCE_DIR}/examples/cpp_poetry_indexer")
+	add_subdirectory("${CMAKE_SOURCE_DIR}/examples/test_indexer")
 
 	if (BUILD_BINDINGS_PYTHON)
 		add_subdirectory("${CMAKE_SOURCE_DIR}/examples/python_api_example")

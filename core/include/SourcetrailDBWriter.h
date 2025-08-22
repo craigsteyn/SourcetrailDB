@@ -501,6 +501,17 @@ public:
 	 */
 	bool recordError(const std::string& message, bool fatal, const SourceRange& location);
 
+	/**
+	 * Records a mapping from a production symbol to a test symbol into the tests table.
+	 * Multiple test symbols may reference the same production symbol. Duplicate inserts are ignored.
+	 *
+	 *  param: symbolId - the id of the production symbol (method/field/class) under test.
+	 *  param: testSymbolId - the id of the test symbol (typically a method) that references the production symbol.
+	 *
+	 *  return: true if successful. false on failure. getLastError() provides the error message.
+	 */
+	bool recordTestMapping(int symbolId, int testSymbolId);
+
 private:
 	void openDatabase();
 	void closeDatabase();

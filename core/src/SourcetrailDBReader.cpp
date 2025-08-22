@@ -443,6 +443,24 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesFr
     return references;
 }
 
+std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesFromSymbolWithKind(int symbolId, sourcetrail::EdgeKind kind) const
+{
+    std::vector<Reference> references;
+    clearLastError();
+
+    if (!isOpen())
+    {
+        setLastError("Database is not open");
+        return references;
+    }
+    std::vector<int> over;
+    over.emplace_back(edgeKindToInt(kind));
+    try { auto edges = m_databaseStorage->getEdgesFromNodeOfKinds(symbolId, over); for (const auto& e: edges) { Reference r; r.id = e.id; r.sourceSymbolId = e.sourceNodeId; r.targetSymbolId = e.targetNodeId; r.edgeKind = intToEdgeKind(e.edgeKind); references.push_back(std::move(r)); } }
+    catch (const std::exception& e) { setLastError(std::string("Exception while getting references from symbol: ") + e.what()); }
+
+    return references;
+}
+
 std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesByType(EdgeKind edgeKind) const
 {
     std::vector<Reference> references;
