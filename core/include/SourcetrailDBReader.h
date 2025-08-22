@@ -52,6 +52,21 @@ class DatabaseStorage;
 class SourcetrailDBReader
 {
 public:
+    // Minimal, compact views for in-memory graph processing
+    struct SymbolBrief
+    {
+        int id;
+        SymbolKind symbolKind;
+        DefinitionKind definitionKind;
+    };
+
+    struct EdgeBrief
+    {
+        int sourceSymbolId;
+        int targetSymbolId;
+        EdgeKind edgeKind;
+    };
+
     // Structure to represent a symbol in the database
     struct Symbol
     {
@@ -155,6 +170,10 @@ public:
      */
     std::vector<Symbol> getAllSymbols() const;
 
+    // Compact arrays for high-performance, read-only consumers
+    // Only integer ids and enum kinds; no strings or locations.
+    std::vector<SymbolBrief> getAllSymbolsBrief() const;
+
     /**
      * Get a symbol by its ID
      *
@@ -192,6 +211,9 @@ public:
      *  return: vector of all references in the database
      */
     std::vector<Reference> getAllReferences() const;
+
+    // Compact edges array without ids/locations; ideal for building adjacency in memory
+    std::vector<EdgeBrief> getAllEdgesBrief() const;
 
     /**
      * Get all references that point TO a specific symbol

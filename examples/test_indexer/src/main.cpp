@@ -59,23 +59,44 @@ int main(int argc, const char* argv[]) {
     }
     std::cout << "Found " << nsSymbols.size() << " namespace symbols for '" << testNamespace << "'" << std::endl;
 
-    // Simplified discovery: only immediate members of the test namespace(s)
+    // Load compact symbol and edge tables into memory for fast read-only traversal
+    auto briefSymbols = reader.getAllSymbolsBrief();
+    auto briefEdges = reader.getAllEdgesBrief();
+    if (!reader.getLastError().empty()) {
+        std::cerr << "Warning: reader reported: " << reader.getLastError() << std::endl;
+    }
+    int maxId = 0;
+    for (const auto& e : briefEdges) { if (e.sourceSymbolId > maxId) maxId = e.sourceSymbolId; if (e.targetSymbolId > maxId) maxId = e.targetSymbolId; }
+    for (const auto& s : briefSymbols) { if (s.id > maxId) maxId = s.id; }
+    std::vector<sourcetrail::SymbolKind> symbolKindById(maxId + 1, sourcetrail::SymbolKind::TYPE);
+    for (const auto& s : briefSymbols) { if (s.id >= 0 && s.id <= maxId) symbolKindById[s.id] = s.symbolKind; }
+    // Build adjacency lists by source; keep edge kind to filter MEMBER during BFS and to find MEMBERS during discovery
+    std::vector<std::vector<std::pair<int,int>>> adjacency(maxId + 1);
+    std::vector<std::vector<int>> memberChildren(maxId + 1);
+    for (const auto& e : briefEdges) {
+        if (e.sourceSymbolId < 0 || e.sourceSymbolId > maxId) continue;
+        adjacency[e.sourceSymbolId].emplace_back(e.targetSymbolId, static_cast<int>(e.edgeKind));
+        if (e.edgeKind == sourcetrail::EdgeKind::MEMBER) {
+            memberChildren[e.sourceSymbolId].push_back(e.targetSymbolId);
+        }
+    }
+
+    // Simplified discovery: only immediate members of the test namespace(s), using in-memory MEMBER edges
     std::vector<int> testClassIds;
     size_t childrenScanned = 0;
     auto lastLog = std::chrono::steady_clock::now();
     for (const auto& ns : nsSymbols) {
-        auto memberEdges = reader.getReferencesFromSymbolWithKind(ns.id, sourcetrail::EdgeKind::MEMBER);
-        for (const auto& e : memberEdges) {
-            int childId = e.targetSymbolId;
+        const auto& kids = (ns.id >=0 && ns.id <= maxId) ? memberChildren[ns.id] : std::vector<int>{};
+        for (const int childId : kids) {
             if (!childId) continue;
             ++childrenScanned;
-            auto child = reader.getSymbolById(childId);
-            if (child.id == 0) continue;
-            if (child.symbolKind == sourcetrail::SymbolKind::CLASS || child.symbolKind == sourcetrail::SymbolKind::STRUCT) {
+            sourcetrail::SymbolKind sk = (childId >=0 && childId <= maxId)? symbolKindById[childId] : sourcetrail::SymbolKind::TYPE;
+            if (sk == sourcetrail::SymbolKind::CLASS || sk == sourcetrail::SymbolKind::STRUCT) {
+                // Only fetch name lazily for suffix check
+                auto child = reader.getSymbolById(childId);
+                if (child.id == 0) continue;
                 const std::string name = child.nameHierarchy.nameElements.empty()? std::string() : child.nameHierarchy.nameElements.back().name;
-                if (hasTestSuffix(name)) {
-                    testClassIds.push_back(child.id);
-                }
+                if (hasTestSuffix(name)) testClassIds.push_back(child.id);
             }
 
             auto now = std::chrono::steady_clock::now();
@@ -119,15 +140,9 @@ int main(int argc, const char* argv[]) {
 
         std::vector<std::thread> methodWorkers;
         methodWorkers.reserve(numThreads);
-    const size_t kClassChunk = 64; // number of classes a worker claims per fetch
-    for (unsigned t = 0; t < numThreads; ++t) {
+        const size_t kClassChunk = 64; // number of classes a worker claims per fetch
+        for (unsigned t = 0; t < numThreads; ++t) {
             methodWorkers.emplace_back([&, t]() {
-                sourcetrail::SourcetrailDBReader localReader;
-                if (!localReader.open(sourceDb)) {
-                    std::cerr << "[method worker " << t << "] Failed to open source db: " << localReader.getLastError() << std::endl;
-                    return;
-                }
-
                 std::vector<int> localMethods;
                 localMethods.reserve(256);
 
@@ -138,12 +153,12 @@ int main(int argc, const char* argv[]) {
 
                     for (size_t i = start; i < end; ++i) {
                         int classId = testClassIds[i];
-                        auto memberEdges = localReader.getReferencesFromSymbolWithKind(classId, sourcetrail::EdgeKind::MEMBER);
-                        for (const auto& e : memberEdges) {
-                            int childId = e.targetSymbolId; if (!childId) continue;
-                            auto sym = localReader.getSymbolById(childId);
-                            if (sym.id && sym.symbolKind == sourcetrail::SymbolKind::METHOD) {
-                                localMethods.push_back(sym.id);
+                        const auto& kids = (classId >= 0 && classId <= maxId) ? memberChildren[classId] : std::vector<int>{};
+                        for (int childId : kids) {
+                            if (!childId) continue;
+                            auto kind = (childId >= 0 && childId <= maxId) ? symbolKindById[childId] : sourcetrail::SymbolKind::TYPE;
+                            if (kind == sourcetrail::SymbolKind::METHOD) {
+                                localMethods.push_back(childId);
                                 methodsFound.fetch_add(1, std::memory_order_relaxed);
                             }
                         }
@@ -162,7 +177,6 @@ int main(int argc, const char* argv[]) {
                     testMethodIds.insert(testMethodIds.end(), localMethods.begin(), localMethods.end());
                     localMethods.clear();
                 }
-                localReader.close();
             });
         }
 
@@ -187,7 +201,7 @@ int main(int argc, const char* argv[]) {
     std::atomic<size_t> pairsDiscovered{0}; // approximate before de-dup into set
     std::atomic<bool> stopProgress{false};
 
-    // Close the initial reader before starting many read-only readers in parallel
+    // Close reader now; remaining operations use in-memory structures only
     reader.close();
 
     // Progress reporter thread
@@ -217,13 +231,6 @@ int main(int argc, const char* argv[]) {
     workers.reserve(numThreads);
     for (unsigned t = 0; t < numThreads; ++t) {
         workers.emplace_back([&, t]() {
-            // Each worker uses its own read-only DB reader instance
-            sourcetrail::SourcetrailDBReader localReader;
-            if (!localReader.open(sourceDb)) {
-                std::cerr << "[worker " << t << "] Failed to open source db: " << localReader.getLastError() << std::endl;
-                return;
-            }
-
             std::vector<std::pair<int,int>> batch; // batched (targetSymbolId, testMethodId)
             batch.reserve(512);
 
@@ -237,10 +244,11 @@ int main(int argc, const char* argv[]) {
                 while(!q.empty()) {
                     int cur = q.front(); q.pop();
                     nodesVisited.fetch_add(1, std::memory_order_relaxed);
-                    auto edges = localReader.getReferencesFromSymbol(cur);
+                    const auto& edges = (cur >= 0 && cur <= maxId) ? adjacency[cur] : std::vector<std::pair<int,int>>{};
                     for (const auto& ref : edges) {
-                        if (ref.edgeKind == sourcetrail::EdgeKind::MEMBER) continue; // don't traverse structure edges outward
-                        int tgt = ref.targetSymbolId; if (!tgt) continue;
+                        int kindInt = ref.second;
+                        if (static_cast<sourcetrail::EdgeKind>(kindInt) == sourcetrail::EdgeKind::MEMBER) continue; // skip structure edges
+                        int tgt = ref.first; if (!tgt) continue;
                         if (visited.insert(tgt).second) {
                             q.push(tgt);
                             batch.emplace_back(tgt, testMethodId);
@@ -262,8 +270,6 @@ int main(int argc, const char* argv[]) {
                 }
                 methodsProcessed.fetch_add(1, std::memory_order_relaxed);
             }
-
-            localReader.close();
         });
     }
 

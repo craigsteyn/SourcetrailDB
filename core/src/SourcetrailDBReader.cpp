@@ -218,6 +218,27 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::getAllSymbols() co
     return symbols;
 }
 
+std::vector<SourcetrailDBReader::SymbolBrief> SourcetrailDBReader::getAllSymbolsBrief() const
+{
+    std::vector<SymbolBrief> out;
+    clearLastError();
+    if (!isOpen()) { setLastError("Database is not open"); return out; }
+    try {
+        // Get all symbols via symbol table, then fetch definition kind directly.
+        std::vector<StorageNode> storageNodes = m_databaseStorage->getAllSymbolNodes();
+        out.reserve(storageNodes.size());
+        for (const auto& n : storageNodes) {
+            int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id);
+            if (defKind < 0) continue; // safety
+            SymbolBrief sb; sb.id = n.id; sb.symbolKind = nodeKindIntToSymbolKind(n.nodeKind); sb.definitionKind = static_cast<DefinitionKind>(defKind);
+            out.push_back(sb);
+        }
+    } catch (const std::exception& e) {
+        setLastError(std::string("Exception while getting brief symbols: ") + e.what());
+    }
+    return out;
+}
+
 SourcetrailDBReader::Symbol SourcetrailDBReader::getSymbolById(int symbolId) const
 {
     Symbol symbol;
@@ -407,6 +428,23 @@ std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getAllReference
     } catch (const std::exception& e) { setLastError(std::string("Exception while getting references: ") + e.what()); }
 
     return references;
+}
+
+std::vector<SourcetrailDBReader::EdgeBrief> SourcetrailDBReader::getAllEdgesBrief() const
+{
+    std::vector<EdgeBrief> out;
+    clearLastError();
+    if (!isOpen()) { setLastError("Database is not open"); return out; }
+    try {
+        std::vector<StorageEdge> storageEdges = m_databaseStorage->getAll<StorageEdge>();
+        out.reserve(storageEdges.size());
+        for (const auto& e : storageEdges) {
+            EdgeBrief eb; eb.sourceSymbolId = e.sourceNodeId; eb.targetSymbolId = e.targetNodeId; eb.edgeKind = intToEdgeKind(e.edgeKind); out.push_back(eb);
+        }
+    } catch (const std::exception& e) {
+        setLastError(std::string("Exception while getting brief edges: ") + e.what());
+    }
+    return out;
 }
 
 std::vector<SourcetrailDBReader::Reference> SourcetrailDBReader::getReferencesToSymbol(int symbolId) const
