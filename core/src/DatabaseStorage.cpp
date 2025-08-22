@@ -17,6 +17,7 @@
 #include "DatabaseStorage.h"
 
 #include <vector>
+#include <iostream>
 
 #include "NodeKind.h"
 #include "SourcetrailException.h"
@@ -509,6 +510,15 @@ void DatabaseStorage::setupTables()
 		"	PRIMARY KEY(id), "
 		"	FOREIGN KEY(id) REFERENCES element(id) ON DELETE CASCADE"
 		");");
+
+	executeStatement(
+		"CREATE TABLE IF NOT EXISTS tests("
+		"	symbol_id INTEGER NOT NULL, "
+		"	test_symbol_id INTEGER NOT NULL, "
+		"	PRIMARY KEY(symbol_id, test_symbol_id), "
+		"	FOREIGN KEY(symbol_id) REFERENCES node(id) ON DELETE CASCADE, "
+		"	FOREIGN KEY(test_symbol_id) REFERENCES node(id) ON DELETE CASCADE"
+		");");
 }
 
 void DatabaseStorage::clearTables()
@@ -525,7 +535,8 @@ void DatabaseStorage::clearTables()
 		"symbol",
 		"node",
 		"edge",
-		"element_component"
+		"element_component",
+		"tests",
 		"element"};
 
 	for (const std::string& tableName: tableNames)
@@ -547,6 +558,10 @@ void DatabaseStorage::setupIndices()
 		"ON source_location(file_node_id, start_line, start_column, end_line, end_column, type);");
 
 	executeStatement("CREATE INDEX IF NOT EXISTS error_all_data_index ON error(message, fatal);");
+
+	// Indices for tests mapping
+	executeStatement("CREATE INDEX IF NOT EXISTS tests_symbol_index ON tests(symbol_id);");
+	executeStatement("CREATE INDEX IF NOT EXISTS tests_test_symbol_index ON tests(test_symbol_id);");
 }
 
 void DatabaseStorage::setupPrecompiledStatements()
@@ -612,6 +627,9 @@ void DatabaseStorage::setupPrecompiledStatements()
 		"INSERT OR REPLACE INTO meta(id, key, value) VALUES("
 		"(SELECT id FROM meta WHERE key = ?), ?, ?"
 		");");
+
+	// Prepared insert for tests mapping
+	m_insertTestMappingStmt = compileStatement("INSERT OR IGNORE INTO tests(symbol_id, test_symbol_id) VALUES(?, ?);");
 }
 
 void DatabaseStorage::clearPrecompiledStatements()
@@ -636,6 +654,7 @@ void DatabaseStorage::clearPrecompiledStatements()
 	m_findErrorStatement.finalize();
 	m_insertErrorStatement.finalize();
 	m_insertOrUpdateMetaValueStmt.finalize();
+	m_insertTestMappingStmt.finalize();
 }
 
 int DatabaseStorage::insertElement()
@@ -653,6 +672,15 @@ void DatabaseStorage::insertOrUpdateMetaValue(const std::string& key, const std:
 	m_insertOrUpdateMetaValueStmt.bind(3, value.c_str());
 	executeStatement(m_insertOrUpdateMetaValueStmt);
 	m_insertOrUpdateMetaValueStmt.reset();
+}
+
+int DatabaseStorage::addTestMapping(int symbolId, int testSymbolId)
+{
+	m_insertTestMappingStmt.bind(1, symbolId);
+	m_insertTestMappingStmt.bind(2, testSymbolId);
+	executeStatement(m_insertTestMappingStmt);
+	m_insertTestMappingStmt.reset();
+	return 1;
 }
 
 CppSQLite3Statement DatabaseStorage::compileStatement(const std::string& statement) const
@@ -905,6 +933,207 @@ std::vector<StorageError> DatabaseStorage::doGetAll<StorageError>(const std::str
 	}
 
 	return errors;
+}
+
+std::vector<StorageNode> DatabaseStorage::getAllSymbolNodes() const
+{
+	CppSQLite3Query q = executeQuery("SELECT n.id, n.type, n.serialized_name FROM node n INNER JOIN symbol s ON n.id = s.id;");
+	std::vector<StorageNode> nodes; 
+	while(!q.eof()) 
+	{ 
+		int id=q.getIntField(0,0); 
+		int type=q.getIntField(1,-1); 
+		std::string ser=q.getStringField(2,""); 
+		if(id&&type!=-1) 
+			nodes.emplace_back(StorageNode(id,type,ser)); 
+		q.nextRow(); 
+	} 
+	return nodes;
+}
+
+std::vector<StorageNode> DatabaseStorage::findSymbolNodesBySerializedNameLike(const std::string& pattern) const
+{
+	CppSQLite3Query q = executeQuery("SELECT n.id, n.type, n.serialized_name FROM node n INNER JOIN symbol s ON n.id = s.id WHERE n.serialized_name LIKE '" + pattern + "';");
+	std::vector<StorageNode> nodes; 
+	while(!q.eof()) 
+	{ 
+		int id=q.getIntField(0,0); 
+		int type=q.getIntField(1,-1); 
+		std::string ser=q.getStringField(2,""); 
+		if(id&&type!=-1) 
+			nodes.emplace_back(StorageNode(id,type,ser)); 
+		q.nextRow(); 
+	} 
+	return nodes;
+}
+
+// --- Targeted read helper implementations ---
+
+std::vector<StorageNode> DatabaseStorage::getNodesBySerializedNameExact(const std::string& serializedName) const
+{
+	CppSQLite3Query q = executeQuery("SELECT id, type, serialized_name FROM node WHERE serialized_name = '" + serializedName + "';");
+	std::vector<StorageNode> nodes;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int type = q.getIntField(1, -1);
+		const std::string ser = q.getStringField(2, "");
+		if (id != 0 && type != -1)
+		{
+			nodes.emplace_back(StorageNode(id, type, ser));
+		}
+		q.nextRow();
+	}
+	return nodes;
+}
+
+std::vector<StorageNode> DatabaseStorage::getNodesBySerializedNameLike(const std::string& pattern) const
+{
+	CppSQLite3Query q = executeQuery("SELECT id, type, serialized_name FROM node WHERE serialized_name LIKE '" + pattern + "';");
+	std::vector<StorageNode> nodes;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int type = q.getIntField(1, -1);
+		const std::string ser = q.getStringField(2, "");
+		if (id != 0 && type != -1)
+		{
+			nodes.emplace_back(StorageNode(id, type, ser));
+		}
+		q.nextRow();
+	}
+	return nodes;
+}
+
+StorageNode DatabaseStorage::getNodeById(int nodeId) const
+{
+	CppSQLite3Query q = executeQuery("SELECT id, type, serialized_name FROM node WHERE id = " + std::to_string(nodeId) + " LIMIT 1;");
+	if (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int type = q.getIntField(1, -1);
+		const std::string ser = q.getStringField(2, "");
+		if (id != 0 && type != -1)
+		{
+			return StorageNode(id, type, ser);
+		}
+	}
+	return StorageNode(0, -1, "");
+}
+
+int DatabaseStorage::getDefinitionKindForSymbol(int symbolId) const
+{
+	CppSQLite3Query q = executeQuery("SELECT definition_kind FROM symbol WHERE id = " + std::to_string(symbolId) + " LIMIT 1;");
+	if (!q.eof())
+	{
+		return q.getIntField(0, -1);
+	}
+	return -1;
+}
+
+std::vector<StorageEdge> DatabaseStorage::getEdgesFromNode(int sourceNodeId) const
+{
+	CppSQLite3Query q = executeQuery("SELECT id, type, source_node_id, target_node_id FROM edge WHERE source_node_id = " + std::to_string(sourceNodeId) + ";");
+	std::vector<StorageEdge> edges;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int kind = q.getIntField(1, -1);
+		const int src = q.getIntField(2, 0);
+		const int tgt = q.getIntField(3, 0);
+		if (id != 0 && kind != -1)
+		{
+			edges.emplace_back(StorageEdge(id, src, tgt, kind));
+		}
+		q.nextRow();
+	}
+	return edges;
+}
+
+std::vector<StorageEdge> DatabaseStorage::getEdgesToNode(int targetNodeId) const
+{
+	std::vector<StorageEdge> edges;
+#if 0
+	// First determine how many rows will be returned so we can reserve capacity.
+	int edgeCount = 0;
+	{
+		CppSQLite3Query cq = executeQuery("SELECT COUNT(*) FROM edge WHERE target_node_id = " + std::to_string(targetNodeId) + ";");
+		if (!cq.eof())
+		{
+			edgeCount = cq.getIntField(0, 0);
+		}
+	}
+
+	// Print the count (basic diagnostic / instrumentation output).
+	std::cout << "[DatabaseStorage] getEdgesToNode targetNodeId=" << targetNodeId << " count=" << edgeCount << std::endl;
+
+
+	edges.reserve(edgeCount);
+#endif
+
+	CppSQLite3Query q = executeQuery("SELECT id, type, source_node_id, target_node_id FROM edge WHERE target_node_id = " + std::to_string(targetNodeId) + ";");
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int kind = q.getIntField(1, -1);
+		const int src = q.getIntField(2, 0);
+		const int tgt = q.getIntField(3, 0);
+		if (id != 0 && kind != -1)
+		{
+			edges.emplace_back(StorageEdge(id, src, tgt, kind));
+		}
+		q.nextRow();
+	}
+	return edges;
+}
+
+std::vector<StorageEdge> DatabaseStorage::getEdgesByType(int edgeKind) const
+{
+	CppSQLite3Query q = executeQuery("SELECT id, type, source_node_id, target_node_id FROM edge WHERE type = " + std::to_string(edgeKind) + ";");
+	std::vector<StorageEdge> edges;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int kind = q.getIntField(1, -1);
+		const int src = q.getIntField(2, 0);
+		const int tgt = q.getIntField(3, 0);
+		if (id != 0 && kind != -1)
+		{
+			edges.emplace_back(StorageEdge(id, src, tgt, kind));
+		}
+		q.nextRow();
+	}
+	return edges;
+}
+
+std::vector<StorageEdge> DatabaseStorage::getEdgesFromNodeOfKinds(int sourceNodeId, const std::vector<int>& kinds) const
+{
+	if (kinds.empty())
+	{
+		return {};
+	}
+	std::string inClause;
+	for (size_t i = 0; i < kinds.size(); ++i)
+	{
+		if (i) inClause += ",";
+		inClause += std::to_string(kinds[i]);
+	}
+	CppSQLite3Query q = executeQuery(
+		"SELECT id, type, source_node_id, target_node_id FROM edge WHERE source_node_id = " + std::to_string(sourceNodeId) + " AND type IN (" + inClause + ");");
+	std::vector<StorageEdge> edges;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int kind = q.getIntField(1, -1);
+		const int src = q.getIntField(2, 0);
+		const int tgt = q.getIntField(3, 0);
+		if (id != 0 && kind != -1)
+		{
+			edges.emplace_back(StorageEdge(id, src, tgt, kind));
+		}
+		q.nextRow();
+	}
+	return edges;
 }
 
 }	 // namespace sourcetrail

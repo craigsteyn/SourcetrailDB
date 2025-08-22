@@ -1,4 +1,4 @@
-cmake_minimum_required (VERSION 2.6)
+cmake_minimum_required (VERSION 3.5)
 
 set(TEST_CORE_TARGET_NAME "test_core")
 
@@ -34,6 +34,7 @@ set(LIB_SRC_FILES
 	src/NodeKind.cpp
 	src/ReferenceKind.cpp
 	src/SourcetrailDBWriter.cpp
+	src/SourcetrailDBReader.cpp
 	src/SymbolKind.cpp
 	src/utility.cpp
 )
@@ -49,6 +50,7 @@ set(LIB_HDR_FILES
 	include/ReferenceKind.h
 	include/SourceRange.h
 	include/SourcetrailDBWriter.h
+	include/SourcetrailDBReader.h
 	include/SourcetrailException.h
 	include/StorageEdge.h
 	include/StorageElementComponent.h

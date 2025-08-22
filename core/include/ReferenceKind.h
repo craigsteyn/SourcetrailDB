@@ -26,6 +26,7 @@ namespace sourcetrail
  */
 enum class ReferenceKind
 {
+	UNDEFINED = 0,
 	TYPE_USAGE,
 	USAGE,
 	CALL,
