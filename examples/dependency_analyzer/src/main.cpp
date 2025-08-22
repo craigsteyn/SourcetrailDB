@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <unordered_map>
 
 #include "SourcetrailDBReader.h"
 
@@ -249,6 +250,64 @@ int main(int argc, const char* argv[])
                 std::cout << "  ID=" << s.id << "  FQN=" << fqn << "  Kind=" << (int)s.symbolKind << std::endl;
             }
 
+            // Load full symbols and compact edges into memory for fast traversal (avoid per-node lookups)
+            auto allSymbols = reader.getAllSymbols();
+            auto briefEdges = reader.getAllEdgesBrief();
+            if (!reader.getLastError().empty()) {
+                std::cerr << "Warning: reader reported: " << reader.getLastError() << std::endl;
+            }
+            int maxId = 0;
+            for (const auto& e : briefEdges) {
+                if (e.sourceSymbolId > maxId) maxId = e.sourceSymbolId;
+                if (e.targetSymbolId > maxId) maxId = e.targetSymbolId;
+            }
+            for (const auto& s : allSymbols) { if (s.id > maxId) maxId = s.id; }
+            // Fast ID -> Symbol lookup table (id 0 means invalid)
+            std::vector<sourcetrail::SourcetrailDBReader::Symbol> symbolById(maxId + 1);
+            for (const auto& s : allSymbols) {
+                if (s.id >= 0 && s.id <= maxId) symbolById[s.id] = s;
+            }
+            auto getSymById = [&](int id) -> const sourcetrail::SourcetrailDBReader::Symbol* {
+                if (id >= 0 && id <= maxId) {
+                    const auto& s = symbolById[id];
+                    if (s.id != 0) return &s;
+                }
+                return nullptr;
+            };
+            // Build FQN string for each symbol and an index FQN -> ids
+            auto buildFqnFromSymbol = [](const sourcetrail::SourcetrailDBReader::Symbol& s) {
+                std::string fqn;
+                for (size_t i=0;i<s.nameHierarchy.nameElements.size();++i) {
+                    if (i) fqn += s.nameHierarchy.nameDelimiter;
+                    fqn += s.nameHierarchy.nameElements[i].name;
+                }
+                return fqn;
+            };
+            std::vector<std::string> fqnById(maxId + 1);
+            std::unordered_map<std::string, std::vector<int>> fqnToIds;
+            fqnToIds.reserve(allSymbols.size()*2);
+            for (const auto& s : allSymbols) {
+                if (s.id < 0 || s.id > maxId) continue;
+                auto fqn = buildFqnFromSymbol(s);
+                fqnById[s.id] = fqn;
+                if (!fqn.empty()) fqnToIds[fqn].push_back(s.id);
+            }
+            // Build adjacency lists: incoming (by target) and outgoing (by source)
+            std::vector<std::vector<std::pair<int,int>>> incomingAdj(maxId + 1);
+            std::vector<std::vector<std::pair<int,int>>> outgoingAdj(maxId + 1);
+            for (const auto& e : briefEdges) {
+                if (e.sourceSymbolId >= 0 && e.sourceSymbolId <= maxId) {
+                    outgoingAdj[e.sourceSymbolId].emplace_back(e.targetSymbolId, static_cast<int>(e.edgeKind));
+                }
+                if (e.targetSymbolId >= 0 && e.targetSymbolId <= maxId) {
+                    // For incoming adjacency, neighbor is the source symbol
+                    incomingAdj[e.targetSymbolId].emplace_back(e.sourceSymbolId, static_cast<int>(e.edgeKind));
+                }
+            }
+
+            // Close the reader now; traversal uses in-memory structures only
+            reader.close();
+
             // BFS traversal collecting reachable test classes in namespace
             // Strategy: Walk incoming references (who depends on the current symbol) because
             // we want classes/tests that use the implementation under test. We stop when we reach
@@ -279,7 +338,7 @@ int main(int argc, const char* argv[])
             };
 
             size_t head = 0; // manual queue for performance
-            const size_t BFS_LIMIT = 100000; // safety cap
+            const size_t BFS_LIMIT = 100000000; // safety cap
             std::chrono::steady_clock::time_point startTime = std::chrono::steady_clock::now();
             std::cout << "[findtests] BFS start. pattern='" << symbolPattern << "' testNamespace='" << testNamespace << "'";
             if (applyKindFilter) std::cout << " kind='" << symbolKindFilterStr << "'";
@@ -288,19 +347,19 @@ int main(int argc, const char* argv[])
             {
                 int currentIndex = static_cast<int>(head); // index BEFORE increment will be head
                 QueueItem item = queue[head++];
-                auto sym = reader.getSymbolById(item.symbolId);
-                if (sym.id==0) continue;
+                const auto* sym = getSymById(item.symbolId);
+                if (!sym) continue;
                 // Build FQN for logging
                 std::string fqnSym;
-                for (size_t i=0;i<sym.nameHierarchy.nameElements.size();++i) {
-                    if (i) fqnSym += sym.nameHierarchy.nameDelimiter;
-                    fqnSym += sym.nameHierarchy.nameElements[i].name;
+                for (size_t i=0;i<sym->nameHierarchy.nameElements.size();++i) {
+                    if (i) fqnSym += sym->nameHierarchy.nameDelimiter;
+                    fqnSym += sym->nameHierarchy.nameElements[i].name;
                 }
                 // If in ignore set, prune expansion (do not enqueue its incoming references)
                 if (!ignoreSet.empty())
                 {
                     auto eachNameElementIgnored = [&]() -> bool {
-                        for (const auto& nameEle : sym.nameHierarchy.nameElements) {
+                        for (const auto& nameEle : sym->nameHierarchy.nameElements) {
                             if (ignoreSet.count(nameEle.name)) return true;
                         }
                         return false;
@@ -308,53 +367,46 @@ int main(int argc, const char* argv[])
                     bool isIgnored = false;
                     if ((!fqnSym.empty() && eachNameElementIgnored()) || ignoreSet.count(fqnSym))
                         isIgnored = true;
-                    else if (!sym.nameHierarchy.nameElements.empty())
+                    else if (!sym->nameHierarchy.nameElements.empty())
                     {
-                        const std::string &simple = sym.nameHierarchy.nameElements.back().name;
+                        const std::string &simple = sym->nameHierarchy.nameElements.back().name;
                         if (ignoreSet.count(simple)) isIgnored = true;
                     }
                     if (isIgnored)
                     {
-                        std::cout << "[findtests]   Pruned (ignored) symbol id=" << sym.id << " fqn=" << fqnSym << std::endl;
+                        std::cout << "[findtests]   Pruned (ignored) symbol id=" << sym->id << " fqn=" << fqnSym << std::endl;
                         continue; // skip detection & expansion
                     }
                 }
-                // Count incoming references (for logging before expansion)
-                auto incomingPreview = reader.getReferencesToSymbol(sym.id);
-                {
-                    // we need to check outgoing edges specifially for "overrides"
-                    auto outgoingPreview = reader.getReferencesFromSymbolWithKind(sym.id, sourcetrail::EdgeKind::OVERRIDE);
-
-                    for (const auto& ref : outgoingPreview) {
-                        // there is an issue here since I believe the sourceNodeID is now dupicated... which will fail the visiting.
-                        incomingPreview.emplace_back(ref);
+                // Gather incoming references from in-memory adjacency and count outgoing OVERRIDE edges
+                const std::vector<std::pair<int,int>>* inEdgesPtr = (sym->id >= 0 && sym->id <= maxId) ? &incomingAdj[sym->id] : nullptr;
+                const std::vector<std::pair<int,int>>* outEdgesPtr = (sym->id >= 0 && sym->id <= maxId) ? &outgoingAdj[sym->id] : nullptr;
+                size_t overrideOutCount = 0;
+                if (outEdgesPtr) {
+                    for (const auto& e : *outEdgesPtr) {
+                        if (static_cast<sourcetrail::EdgeKind>(e.second) == sourcetrail::EdgeKind::OVERRIDE) ++overrideOutCount;
                     }
                 }
 #if LOG
                 std::cout << "[findtests] Pop depth=" << item.depth
-                          << " id=" << sym.id
-                          << " kind=" << (int)sym.symbolKind
+                          << " id=" << sym->id
+                          << " kind=" << (int)sym->symbolKind
                           << " fqn=" << fqnSym
-                          << " incoming_refs=" << incomingPreview.size()
+                          << " incoming_refs=" << ((inEdgesPtr?inEdgesPtr->size():0) + overrideOutCount)
                           << " visited=" << visited.size()
                           << " queue_remaining=" << (queue.size() - head)
                           << std::endl;
 #endif
-                if (inNamespace(sym))
+                if (inNamespace(*sym))
                 {
                     auto hasFqn = [&](const std::string& fqn) {
                         return foundTestFqnsSet.find(fqn) != foundTestFqnsSet.end();
                     };
                     // Helper to construct FQN from symbol id (cached via local lambda)
                     auto buildFqnFromId = [&](int sid) -> std::string {
-                        auto sObj = reader.getSymbolById(sid);
-                        if (sObj.id == 0) return std::string();
-                        std::string fqn;
-                        for (size_t i=0;i<sObj.nameHierarchy.nameElements.size();++i) {
-                            if (i) fqn += sObj.nameHierarchy.nameDelimiter;
-                            fqn += sObj.nameHierarchy.nameElements[i].name;
-                        }
-                        return fqn;
+                        const auto* sObj = getSymById(sid);
+                        if (!sObj) return std::string();
+                        return fqnById[sid];
                     };
                     // Build path (list of symbol ids) from a queue index up to root.
                     auto buildPathChain = [&](int idx) -> std::vector<int> {
@@ -397,32 +449,34 @@ int main(int argc, const char* argv[])
                         return false;
                     };
 
-                    if (!sym.nameHierarchy.nameElements.empty())
+                    if (!sym->nameHierarchy.nameElements.empty())
                     {
-                        const std::string last = sym.nameHierarchy.nameElements.back().name;
+                        const std::string last = sym->nameHierarchy.nameElements.back().name;
                         // Direct class/struct detection
-                        if ((sym.symbolKind == sourcetrail::SymbolKind::CLASS || sym.symbolKind == sourcetrail::SymbolKind::STRUCT) && isTestClassName(last))
+                        if ((sym->symbolKind == sourcetrail::SymbolKind::CLASS || sym->symbolKind == sourcetrail::SymbolKind::STRUCT) && isTestClassName(last))
                         {
-                            ensureAddTestClass(sym.id, fqnSym);
+                            ensureAddTestClass(sym->id, fqnSym);
                         }
                         // Method inside a test class: ascend to parent element
-                        else if (sym.symbolKind == sourcetrail::SymbolKind::METHOD && sym.nameHierarchy.nameElements.size() >= 2)
+                        else if (sym->symbolKind == sourcetrail::SymbolKind::METHOD && sym->nameHierarchy.nameElements.size() >= 2)
                         {
-                            const std::string parentName = sym.nameHierarchy.nameElements[sym.nameHierarchy.nameElements.size()-2].name;
+                            const std::string parentName = sym->nameHierarchy.nameElements[sym->nameHierarchy.nameElements.size()-2].name;
                             if (isTestClassName(parentName))
                             {
                                 // Build parent FQN
                                 std::string parentFqn;
-                                for (size_t i=0;i<sym.nameHierarchy.nameElements.size()-1;++i) {
-                                    if (i) parentFqn += sym.nameHierarchy.nameDelimiter;
-                                    parentFqn += sym.nameHierarchy.nameElements[i].name;
+                                for (size_t i=0;i<sym->nameHierarchy.nameElements.size()-1;++i) {
+                                    if (i) parentFqn += sym->nameHierarchy.nameDelimiter;
+                                    parentFqn += sym->nameHierarchy.nameElements[i].name;
                                 }
                                 if(!hasFqn(parentFqn)) {
-                                        
-                                    auto parentSyms = reader.findSymbolsByQualifiedName(parentFqn, true);
-                                    for (auto &ps : parentSyms) {
-                                        if (ps.symbolKind == sourcetrail::SymbolKind::CLASS || ps.symbolKind == sourcetrail::SymbolKind::STRUCT)
-                                            ensureAddTestClass(ps.id, parentFqn, {ps.id});
+                                    auto it = fqnToIds.find(parentFqn);
+                                    if (it != fqnToIds.end()) {
+                                        for (int pid : it->second) {
+                                            const auto* ps = getSymById(pid);
+                                            if (ps && (ps->symbolKind == sourcetrail::SymbolKind::CLASS || ps->symbolKind == sourcetrail::SymbolKind::STRUCT))
+                                                ensureAddTestClass(ps->id, parentFqn, {ps->id});
+                                        }
                                     }
                                 }
                                 else
@@ -434,48 +488,60 @@ int main(int argc, const char* argv[])
                         }
                     }
                 }
-                // Expand incoming references (who uses this symbol)
+                // Expand incoming references (who uses this symbol) and also outgoing OVERRIDE edges
                 size_t enqueuedThisNode = 0;
-                for (const auto& ref : incomingPreview) {
-                    // we need to be more specific about which nodes we queue.
-                    int nextId = ref.sourceSymbolId;
-                    auto srcSym = reader.getSymbolById(nextId);
-                    // this code is pretty gross. but the idea is. depending on our kind filtering we want to apply
-                    // certain visiting rules to avoid exploding outwards to ALL TYPES
+                auto processEdge = [&](int neighborId, sourcetrail::EdgeKind edgeKind){
+                    int nextId = neighborId;
+                    const auto* srcSym = getSymById(nextId);
                     switch (kindFilterValue) {
-                    case sourcetrail::SymbolKind::CLASS:
-                        break;
-                    case sourcetrail::SymbolKind::METHOD:
-                        if( ref.edgeKind == sourcetrail::EdgeKind::MEMBER || ref.edgeKind == sourcetrail::EdgeKind::TYPE_USAGE) {
-                            // skip type usages, type usage references represent a class which owns the method.
-                            continue; 
-                        }
-                        break;
-                    default:
-                        // no filter, enqueue all references
-                        break;
+                        case sourcetrail::SymbolKind::CLASS:
+                            // No special filtering for class mode (keep behavior consistent)
+                            break;
+                        case sourcetrail::SymbolKind::METHOD:
+                            if (edgeKind == sourcetrail::EdgeKind::MEMBER || edgeKind == sourcetrail::EdgeKind::TYPE_USAGE) {
+                                // skip structure edges when focusing on methods
+                                return; 
+                            }
+                            break;
+                        default:
+                            break;
                     }
                     bool inserted = visited.insert(nextId).second;
 #if 1 // detailed per-reference debug (toggle to 0 to silence)
                     // Build FQN of source symbol (caller / user)
                     std::string srcFqn;
-                    if (srcSym.id) {
-                        for (size_t i = 0; i < srcSym.nameHierarchy.nameElements.size(); ++i) {
-                            if (i) srcFqn += srcSym.nameHierarchy.nameDelimiter;
-                            srcFqn += srcSym.nameHierarchy.nameElements[i].name;
+                    if (srcSym && srcSym->id) {
+                        for (size_t i = 0; i < srcSym->nameHierarchy.nameElements.size(); ++i) {
+                            if (i) srcFqn += srcSym->nameHierarchy.nameDelimiter;
+                            srcFqn += srcSym->nameHierarchy.nameElements[i].name;
                         }
                     }
                     std::cout << "[findtests]     Incoming ref: "
                               << (srcFqn.empty() ? std::string("<anon:"+std::to_string(nextId)+">") : srcFqn)
-                              << " --[" << getEdgeKindName(ref.edgeKind) << "]--> "
-                              << (fqnSym.empty() ? std::string("<anon:"+std::to_string(sym.id)+">") : fqnSym)
-                              << " srcKind=" << (srcSym.id ? getSymbolKindName(srcSym.symbolKind) : std::string("<missing>"))
+                              << " --[" << getEdgeKindName(edgeKind) << "]--> "
+                              << (fqnSym.empty() ? std::string("<anon:"+std::to_string(sym->id)+">") : fqnSym)
+                              << " srcKind=" << (srcSym && srcSym->id ? getSymbolKindName(srcSym->symbolKind) : std::string("<missing>"))
                               << " action=" << (inserted ? "ENQUEUE" : "SKIP_ALREADY_VISITED")
                               << std::endl;
 #endif
                     if (inserted) {
                         queue.push_back({nextId, item.depth+1, currentIndex});
                         ++enqueuedThisNode;
+                    }
+                };
+                // Process true incoming edges (neighbors are sources)
+                if (inEdgesPtr) {
+                    for (const auto& ref : *inEdgesPtr) {
+                        processEdge(ref.first, static_cast<sourcetrail::EdgeKind>(ref.second));
+                    }
+                }
+                // Additionally process outgoing OVERRIDE edges as if incoming
+                if (outEdgesPtr) {
+                    for (const auto& ref : *outEdgesPtr) {
+                        auto kind = static_cast<sourcetrail::EdgeKind>(ref.second);
+                        if (kind == sourcetrail::EdgeKind::OVERRIDE) {
+                            processEdge(ref.first, kind);
+                        }
                     }
                 }
 #if 1

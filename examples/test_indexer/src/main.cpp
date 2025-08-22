@@ -189,16 +189,21 @@ int main(int argc, const char* argv[]) {
     testMethodIds.erase(std::unique(testMethodIds.begin(), testMethodIds.end()), testMethodIds.end());
     std::cout << "Found " << testClassIds.size() << " test classes and " << testMethodIds.size() << " unique test methods" << std::endl;
 
-    // Multithreaded BFS per test method over outgoing references; collect mappings in memory.
-    // We protect the shared mappingSet with a mutex. To reduce contention, workers batch inserts.
-    std::set<std::pair<int,int>> mappingSet; // (targetSymbolId, testMethodId)
-    std::mutex mappingMutex;
+    // Prepare a single writer and mutex; workers will flush per method in small batches.
+    sourcetrail::SourcetrailDBWriter writer;
+    if (!writer.open(targetDb)) {
+        std::cerr << "Failed to open target db: " << writer.getLastError() << std::endl;
+        return 1;
+    }
+    writer.beginTransaction();
+    std::mutex writerMutex;
 
     // Progress metrics
     const size_t totalMethods = testMethodIds.size();
     std::atomic<size_t> methodsProcessed{0};
     std::atomic<size_t> nodesVisited{0};
-    std::atomic<size_t> pairsDiscovered{0}; // approximate before de-dup into set
+    std::atomic<size_t> pairsDiscovered{0};
+    std::atomic<size_t> pairsRecorded{0};
     std::atomic<bool> stopProgress{false};
 
     // Close reader now; remaining operations use in-memory structures only
@@ -210,15 +215,11 @@ int main(int argc, const char* argv[]) {
             size_t processed = methodsProcessed.load(std::memory_order_relaxed);
             size_t visited = nodesVisited.load(std::memory_order_relaxed);
             size_t discovered = pairsDiscovered.load(std::memory_order_relaxed);
-            size_t uniquePairs = 0;
-            {
-                std::lock_guard<std::mutex> lock(mappingMutex);
-                uniquePairs = mappingSet.size();
-            }
+            size_t recorded = pairsRecorded.load(std::memory_order_relaxed);
             std::cout << "[progress] methods " << processed << "/" << totalMethods
                       << ", nodes visited " << visited
                       << ", pairs discovered ~" << discovered
-                      << ", unique mappings " << uniquePairs << std::endl;
+                      << ", pairs recorded " << recorded << std::endl;
             std::this_thread::sleep_for(std::chrono::seconds(5));
         }
     });
@@ -239,10 +240,15 @@ int main(int argc, const char* argv[]) {
                 if (i >= totalMethods) break;
                 int testMethodId = testMethodIds[i];
 
-                std::set<int> visited; std::queue<int> q;
-                visited.insert(testMethodId); q.push(testMethodId);
+                std::set<int> visited; 
+                //std::queue<int> q;
+                visited.insert(testMethodId); 
+                //q.push(testMethodId);
+                std::stack<int> q;
+                q.push(testMethodId);
                 while(!q.empty()) {
-                    int cur = q.front(); q.pop();
+                    int cur = q.top();
+                    q.pop();
                     nodesVisited.fetch_add(1, std::memory_order_relaxed);
                     const auto& edges = (cur >= 0 && cur <= maxId) ? adjacency[cur] : std::vector<std::pair<int,int>>{};
                     for (const auto& ref : edges) {
@@ -253,9 +259,13 @@ int main(int argc, const char* argv[]) {
                             q.push(tgt);
                             batch.emplace_back(tgt, testMethodId);
                             pairsDiscovered.fetch_add(1, std::memory_order_relaxed);
-                            if (batch.size() >= 256) {
-                                std::lock_guard<std::mutex> lock(mappingMutex);
-                                for (const auto& p : batch) mappingSet.emplace(p);
+                            if (batch.size() >= 512) {
+                                std::lock_guard<std::mutex> lock(writerMutex);
+                                for (const auto& p : batch) {
+                                    if (writer.recordTestMapping(p.first, p.second)) {
+                                        pairsRecorded.fetch_add(1, std::memory_order_relaxed);
+                                    }
+                                }
                                 batch.clear();
                             }
                         }
@@ -264,8 +274,12 @@ int main(int argc, const char* argv[]) {
 
                 // Flush any remaining batch for this method
                 if (!batch.empty()) {
-                    std::lock_guard<std::mutex> lock(mappingMutex);
-                    for (const auto& p : batch) mappingSet.emplace(p);
+                    std::lock_guard<std::mutex> lock(writerMutex);
+                    for (const auto& p : batch) {
+                        if (writer.recordTestMapping(p.first, p.second)) {
+                            pairsRecorded.fetch_add(1, std::memory_order_relaxed);
+                        }
+                    }
                     batch.clear();
                 }
                 methodsProcessed.fetch_add(1, std::memory_order_relaxed);
@@ -277,21 +291,8 @@ int main(int argc, const char* argv[]) {
     stopProgress.store(true, std::memory_order_relaxed);
     progressThread.join();
 
-    std::cout << "Collected " << mappingSet.size() << " mappings. Writing to target DB..." << std::endl;
-
-    sourcetrail::SourcetrailDBWriter writer;
-    if (!writer.open(targetDb)) {
-        std::cerr << "Failed to open target db: " << writer.getLastError() << std::endl;
-        return 1;
-    }
-    writer.beginTransaction();
-    size_t mappings = 0;
-    for (const auto& p : mappingSet) {
-        if (writer.recordTestMapping(p.first, p.second)) ++mappings;
-        else std::cerr << "recordTestMapping failed: " << writer.getLastError() << std::endl;
-    }
     writer.commitTransaction();
-    std::cout << "Recorded " << mappings << " test mappings" << std::endl;
+    std::cout << "Recorded " << pairsRecorded.load() << " test mappings" << std::endl;
     writer.close();
     return 0;
 }
