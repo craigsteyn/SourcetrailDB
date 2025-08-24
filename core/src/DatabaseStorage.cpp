@@ -1006,6 +1006,33 @@ std::vector<StorageNode> DatabaseStorage::getSymbolNodesByFileIds(const std::vec
 	return nodes;
 }
 
+std::vector<StorageSourceLocation> DatabaseStorage::getSourceLocationsByFileId(int fileNodeId) const
+{
+	if (fileNodeId == 0) return {};
+	const std::string query =
+		"SELECT id, file_node_id, start_line, start_column, end_line, end_column, type "
+		"FROM source_location WHERE file_node_id = " + std::to_string(fileNodeId) + ";";
+
+	CppSQLite3Query q = executeQuery(query);
+	std::vector<StorageSourceLocation> out;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int fId = q.getIntField(1, 0);
+		const int sl = q.getIntField(2, -1);
+		const int sc = q.getIntField(3, -1);
+		const int el = q.getIntField(4, -1);
+		const int ec = q.getIntField(5, -1);
+		const int tk = q.getIntField(6, -1);
+		if (id != 0 && fId != 0 && sl != -1 && sc != -1 && el != -1 && ec != -1 && tk != -1)
+		{
+			out.emplace_back(StorageSourceLocation(id, fId, sl, sc, el, ec, tk));
+		}
+		q.nextRow();
+	}
+	return out;
+}
+
 std::vector<StorageNode> DatabaseStorage::getNodesBySerializedNameExact(const std::string& serializedName) const
 {
 	CppSQLite3Query q = executeQuery("SELECT id, type, serialized_name FROM node WHERE serialized_name = '" + serializedName + "';");
@@ -1171,6 +1198,77 @@ std::vector<StorageEdge> DatabaseStorage::getEdgesFromNodeOfKinds(int sourceNode
 		q.nextRow();
 	}
 	return edges;
+}
+
+std::vector<StorageOccurrence> DatabaseStorage::getOccurrencesByElementId(int elementId) const
+{
+	if (elementId == 0) return {};
+	CppSQLite3Query q = executeQuery("SELECT element_id, source_location_id FROM occurrence WHERE element_id = " + std::to_string(elementId) + ";");
+	std::vector<StorageOccurrence> out;
+	while (!q.eof())
+	{
+		const int eid = q.getIntField(0, 0);
+		const int sid = q.getIntField(1, 0);
+		if (eid != 0 && sid != 0)
+		{
+			out.emplace_back(StorageOccurrence(eid, sid));
+		}
+		q.nextRow();
+	}
+	return out;
+}
+
+std::vector<StorageSourceLocation> DatabaseStorage::getSourceLocationsByIds(const std::vector<int>& ids) const
+{
+	if (ids.empty()) return {};
+	std::string inClause; inClause.reserve(ids.size() * 6);
+	for (size_t i = 0; i < ids.size(); ++i) { if (i) inClause += ","; inClause += std::to_string(ids[i]); }
+	CppSQLite3Query q = executeQuery("SELECT id, file_node_id, start_line, start_column, end_line, end_column, type FROM source_location WHERE id IN (" + inClause + ") ;");
+	std::vector<StorageSourceLocation> out;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int fId = q.getIntField(1, 0);
+		const int sl = q.getIntField(2, -1);
+		const int sc = q.getIntField(3, -1);
+		const int el = q.getIntField(4, -1);
+		const int ec = q.getIntField(5, -1);
+		const int tk = q.getIntField(6, -1);
+		if (id != 0 && fId != 0 && sl != -1 && sc != -1 && el != -1 && ec != -1 && tk != -1)
+		{
+			out.emplace_back(StorageSourceLocation(id, fId, sl, sc, el, ec, tk));
+		}
+		q.nextRow();
+	}
+	return out;
+}
+
+std::vector<StorageSourceLocation> DatabaseStorage::getSourceLocationsForElementInFile(int elementId, int fileNodeId) const
+{
+	if (elementId == 0 || fileNodeId == 0) return {};
+	const std::string query =
+		"SELECT sl.id, sl.file_node_id, sl.start_line, sl.start_column, sl.end_line, sl.end_column, sl.type "
+		"FROM source_location sl "
+		"JOIN occurrence o ON o.source_location_id = sl.id "
+		"WHERE o.element_id = " + std::to_string(elementId) + " AND sl.file_node_id = " + std::to_string(fileNodeId) + ";";
+	CppSQLite3Query q = executeQuery(query);
+	std::vector<StorageSourceLocation> out;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int fId = q.getIntField(1, 0);
+		const int sl = q.getIntField(2, -1);
+		const int sc = q.getIntField(3, -1);
+		const int el = q.getIntField(4, -1);
+		const int ec = q.getIntField(5, -1);
+		const int tk = q.getIntField(6, -1);
+		if (id != 0 && fId != 0 && sl != -1 && sc != -1 && el != -1 && ec != -1 && tk != -1)
+		{
+			out.emplace_back(StorageSourceLocation(id, fId, sl, sc, el, ec, tk));
+		}
+		q.nextRow();
+	}
+	return out;
 }
 
 }	 // namespace sourcetrail

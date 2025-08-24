@@ -52,6 +52,17 @@ class DatabaseStorage;
 class SourcetrailDBReader
 {
 public:
+    // Structure to represent source location information
+    struct SourceLocation
+    {
+        int id;
+        int fileId;
+        int startLine;
+        int startColumn;
+        int endLine;
+        int endColumn;
+        LocationKind locationType;
+    };
     // Minimal, compact views for in-memory graph processing
     struct SymbolBrief
     {
@@ -74,7 +85,7 @@ public:
         NameHierarchy nameHierarchy;
         SymbolKind symbolKind;
         DefinitionKind definitionKind;
-        std::vector<SourceRange> locations;
+        std::vector<SourceLocation> locations;
     };
 
     // Structure to represent a reference/edge between symbols
@@ -84,7 +95,7 @@ public:
         int sourceSymbolId;
         int targetSymbolId;
         EdgeKind edgeKind;               // Previously ReferenceKind referenceKind; now reflects actual stored EdgeKind
-        std::vector<SourceRange> locations;
+        std::vector<SourceLocation> locations;
     };
 
     // Structure to represent a file in the database
@@ -95,18 +106,6 @@ public:
         std::string language;
         bool indexed;
         bool complete;
-    };
-
-    // Structure to represent source location information
-    struct SourceLocation
-    {
-        int id;
-        int fileId;
-        int startLine;
-        int startColumn;
-        int endLine;
-        int endColumn;
-        LocationKind locationType;
     };
 
 public:
@@ -290,6 +289,9 @@ public:
 
     // New: Fetch symbols that have at least one location in any of the given file IDs
     std::vector<Symbol> getSymbolsInFiles(const std::vector<int>& fileIds) const;
+
+    // New: Return SourceLocation entries only within a specific file for the given symbol/node id
+    std::vector<SourceLocation> getSourceLocationsForSymbolInFile(int symbolId, int fileId) const;
 
     /**
      * Get database statistics

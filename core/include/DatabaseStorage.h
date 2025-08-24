@@ -95,6 +95,14 @@ public:
 	// Fetch symbols that have occurrences in any of the given file node IDs
 	std::vector<StorageNode> getSymbolNodesByFileIds(const std::vector<int>& fileNodeIds) const;
 
+	// Fetch source locations for a given file node ID
+	std::vector<StorageSourceLocation> getSourceLocationsByFileId(int fileNodeId) const;
+
+	// New targeted helpers
+	std::vector<StorageOccurrence> getOccurrencesByElementId(int elementId) const;
+	std::vector<StorageSourceLocation> getSourceLocationsByIds(const std::vector<int>& ids) const;
+	std::vector<StorageSourceLocation> getSourceLocationsForElementInFile(int elementId, int fileNodeId) const;
+
 	template <typename ResultType>
 	std::vector<ResultType> getAll() const
 	{

@@ -614,24 +614,40 @@ std::vector<SourcetrailDBReader::SourceLocation> SourcetrailDBReader::getSourceL
 {
     std::vector<SourceLocation> locations;
     clearLastError();
+    if (!isOpen()) { setLastError("Database is not open"); return locations; }
 
-    if (!isOpen())
-    {
-        setLastError("Database is not open");
-        return locations;
-    }
+    try {
+        // 1) Get all occurrence rows for this element
+        const std::vector<StorageOccurrence> occ = m_databaseStorage->getOccurrencesByElementId(symbolId);
+        if (occ.empty()) return locations;
 
-    try
-    {
-        // This would need to be implemented by querying the source_location and occurrence tables
-        // For now, return empty vector
-        setLastError("getSourceLocationsForSymbol not yet fully implemented");
-    }
-    catch (const std::exception& e)
-    {
+        // 2) Fetch the corresponding source_location rows in one go
+        std::vector<int> ids; ids.reserve(occ.size());
+        for (const auto& o : occ) ids.push_back(o.sourceLocationId);
+        const std::vector<StorageSourceLocation> sl = m_databaseStorage->getSourceLocationsByIds(ids);
+        locations.reserve(sl.size());
+        for (const auto& s : sl) {
+            SourceLocation loc; 
+            loc.id = s.id; 
+            loc.fileId = s.fileNodeId; 
+            loc.startLine = s.startLineNumber; 
+            loc.startColumn = s.startColumnNumber; 
+            loc.endLine = s.endLineNumber; 
+            loc.endColumn = s.endColumnNumber; 
+            loc.locationType = intToLocationKind(s.locationKind);
+            locations.push_back(std::move(loc));
+        }
+
+        std::sort(locations.begin(), locations.end(), [](const SourceLocation& a, const SourceLocation& b){
+            if (a.fileId != b.fileId) return a.fileId < b.fileId;
+            if (a.startLine != b.startLine) return a.startLine < b.startLine;
+            if (a.startColumn != b.startColumn) return a.startColumn < b.startColumn;
+            if (a.endLine != b.endLine) return a.endLine < b.endLine;
+            return a.endColumn < b.endColumn;
+        });
+    } catch (const std::exception& e) {
         setLastError(std::string("Exception while getting source locations for symbol: ") + e.what());
     }
-
     return locations;
 }
 
@@ -648,9 +664,34 @@ std::vector<SourcetrailDBReader::SourceLocation> SourcetrailDBReader::getSourceL
 
     try
     {
-        // This would need to be implemented by querying the source_location table with file_id filter
-        // For now, return empty vector
-        setLastError("getSourceLocationsInFile not yet fully implemented");
+        // Efficient targeted query through storage helper
+        const std::vector<StorageSourceLocation> storageLocations = m_databaseStorage->getSourceLocationsByFileId(fileId);
+        locations.reserve(storageLocations.size());
+
+        for (const auto& sl : storageLocations)
+        {
+            SourceLocation loc;
+            loc.id = sl.id;
+            loc.fileId = sl.fileNodeId;
+            loc.startLine = sl.startLineNumber;
+            loc.startColumn = sl.startColumnNumber;
+            loc.endLine = sl.endLineNumber;
+            loc.endColumn = sl.endColumnNumber;
+            loc.locationType = intToLocationKind(sl.locationKind);
+            locations.push_back(std::move(loc));
+        }
+
+        // Sort locations by start position for stable ordering
+        std::sort(
+            locations.begin(),
+            locations.end(),
+            [](const SourceLocation& a, const SourceLocation& b) {
+                if (a.startLine != b.startLine) return a.startLine < b.startLine;
+                if (a.startColumn != b.startColumn) return a.startColumn < b.startColumn;
+                if (a.endLine != b.endLine) return a.endLine < b.endLine;
+                return a.endColumn < b.endColumn;
+            }
+        );
     }
     catch (const std::exception& e)
     {
@@ -685,6 +726,40 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::getSymbolsInFiles(
         setLastError(std::string("Exception while getting symbols in files: ") + e.what());
     }
     return symbols;
+}
+
+std::vector<SourcetrailDBReader::SourceLocation> SourcetrailDBReader::getSourceLocationsForSymbolInFile(int symbolId, int fileId) const
+{
+    std::vector<SourceLocation> locations;
+    clearLastError();
+    if (!isOpen()) { setLastError("Database is not open"); return locations; }
+    if (fileId == 0) { return locations; }
+
+    try {
+        const std::vector<StorageSourceLocation> sls = m_databaseStorage->getSourceLocationsForElementInFile(symbolId, fileId);
+        locations.reserve(sls.size());
+        for (const auto& sl : sls) {
+            SourceLocation loc;
+            loc.id = sl.id;
+            loc.fileId = sl.fileNodeId;
+            loc.startLine = sl.startLineNumber;
+            loc.startColumn = sl.startColumnNumber;
+            loc.endLine = sl.endLineNumber;
+            loc.endColumn = sl.endColumnNumber;
+            loc.locationType = intToLocationKind(sl.locationKind);
+            locations.push_back(std::move(loc));        
+        }
+
+        std::sort(locations.begin(), locations.end(), [](const SourceLocation& a, const SourceLocation& b){
+            if (a.startLine != b.startLine) return a.startLine < b.startLine;
+            if (a.startColumn != b.startColumn) return a.startColumn < b.startColumn;
+            if (a.endLine != b.endLine) return a.endLine < b.endLine;
+            return a.endColumn < b.endColumn;
+        });
+    } catch (const std::exception& e) {
+        setLastError(std::string("Exception while getting source ranges for symbol in file: ") + e.what());
+    }
+    return locations;
 }
 
 std::string SourcetrailDBReader::getDatabaseStats() const
