@@ -11,6 +11,9 @@ add_executable(${EXAMPLE_TARGET_NAME} ${EXAMPLE_SRC_FILES})
 
 set_target_properties(${EXAMPLE_TARGET_NAME} PROPERTIES OUTPUT_NAME "code_chunker")
 
+# Require C++17 for std::filesystem
+target_compile_features(${EXAMPLE_TARGET_NAME} PRIVATE cxx_std_17)
+
 target_include_directories(${EXAMPLE_TARGET_NAME} PUBLIC
     "${CORE_SOURCE_DIR}/include"
     "${CORE_BINARY_DIR}/include"

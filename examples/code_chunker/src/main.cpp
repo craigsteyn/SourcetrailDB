@@ -7,6 +7,7 @@
 #include <cctype>
 #include <chrono>
 #include <random>
+#include <filesystem>
 
 #include "SourcetrailDBReader.h"
 #include "yyjson.h"
@@ -18,6 +19,7 @@ struct ChunkerConfig
     std::string project_description;
     std::string root_dir;
     std::string indexed_root; // root path used when the DB was indexed (e.g., Z:/mcb)
+    std::string chunk_output_root; // where to write chunk jsons
     std::vector<std::string> paths_to_chunk;
 };
 
@@ -74,6 +76,7 @@ static bool parseConfig(const std::string &jsonPath, ChunkerConfig &cfg)
     get_str("project_description", cfg.project_description);
     get_str("root_dir", cfg.root_dir);
     get_str("indexed_root", cfg.indexed_root);
+    get_str("chunk_output_root", cfg.chunk_output_root);
 
     if (yyjson_val *arr = yyjson_obj_get(root, "paths_to_chunk"))
     {
@@ -98,6 +101,11 @@ static bool parseConfig(const std::string &jsonPath, ChunkerConfig &cfg)
     if (cfg.project_name.empty())
     {
         std::cerr << "Config missing 'project_name'." << std::endl;
+        return false;
+    }
+    if (cfg.chunk_output_root.empty())
+    {
+        std::cerr << "Config missing 'chunk_output_root'." << std::endl;
         return false;
     }
     return true;
@@ -165,6 +173,167 @@ static inline std::string mapDbPathToLocal(const std::string &dbPath,
         }
     }
     return dbNorm; // fallback to the DB path if it doesn't lie under indexedRoot
+}
+
+// Return relative path of absolutePath w.r.t base. If not under base, return filename only.
+static inline std::string makeRelativeTo(const std::string &absolutePath, const std::string &base)
+{
+    std::string abs = normalizePath(absolutePath);
+    std::string b = normalizePath(base);
+    if (b.empty())
+        return abs;
+    std::string bSlash = b;
+    if (bSlash.back() != '/')
+        bSlash.push_back('/');
+    if (abs == b)
+        return std::string();
+    if (abs.size() > bSlash.size() && abs.rfind(bSlash, 0) == 0)
+        return abs.substr(bSlash.size());
+    // fallback: last path segment
+    auto pos = abs.find_last_of('/');
+    return (pos == std::string::npos) ? abs : abs.substr(pos + 1);
+}
+
+// no longer need POSIX mkdir machinery; prefer std::filesystem
+
+// Ensure directory exists for given file path (creates parent dirs)
+static inline bool ensureParentDir(const std::string &filePath)
+{
+    try
+    {
+        std::filesystem::path p(filePath);
+        p = p.parent_path();
+        if (p.empty())
+            return true;
+
+        std::error_code ec;
+        if (std::filesystem::exists(p, ec))
+            return true;
+
+        // create_directories is idempotent; still check existence in case of benign races
+        if (std::filesystem::create_directories(p, ec))
+            return true;
+
+        return std::filesystem::exists(p); // true if another process created it
+    }
+    catch (...)
+    {
+        return false;
+    }
+}
+
+static inline const char *edgeKindToString(sourcetrail::EdgeKind k)
+{
+    using EK = sourcetrail::EdgeKind;
+    switch (k)
+    {
+    case EK::MEMBER: return "member";
+    case EK::TYPE_USAGE: return "type_usage";
+    case EK::USAGE: return "usage";
+    case EK::CALL: return "call";
+    case EK::INHERITANCE: return "inheritance";
+    case EK::OVERRIDE: return "override";
+    case EK::TYPE_ARGUMENT: return "type_argument";
+    case EK::TEMPLATE_SPECIALIZATION: return "template_specialization";
+    case EK::INCLUDE: return "include";
+    case EK::IMPORT: return "import";
+    case EK::MACRO_USAGE: return "macro_usage";
+    case EK::ANNOTATION_USAGE: return "annotation_usage";
+    default: return "unknown";
+    }
+}
+
+static inline const char *symbolKindToString(sourcetrail::SymbolKind k)
+{
+    using SK = sourcetrail::SymbolKind;
+    switch (k)
+    {
+    case SK::CLASS: return "class";
+    case SK::STRUCT: return "struct";
+    case SK::INTERFACE: return "interface";
+    case SK::FUNCTION: return "function";
+    case SK::METHOD: return "method";
+    case SK::FIELD: return "field";
+    case SK::GLOBAL_VARIABLE: return "global_variable";
+    case SK::NAMESPACE: return "namespace";
+    case SK::ENUM: return "enum";
+    case SK::ENUM_CONSTANT: return "enum_constant";
+    case SK::TYPEDEF: return "typedef";
+    case SK::UNION: return "union";
+    case SK::BUILTIN_TYPE: return "builtin_type";
+    case SK::TYPE_PARAMETER: return "type_parameter";
+    case SK::MODULE: return "module";
+    case SK::PACKAGE: return "package";
+    case SK::ANNOTATION: return "annotation";
+    case SK::MACRO: return "macro";
+    case SK::TYPE: return "type";
+    default: return "unknown";
+    }
+}
+
+// not certain this functions is correct
+static inline std::string nameHierarchyToString(const sourcetrail::NameHierarchy &nh)
+{
+    // Build qualified name by joining element names with delimiter, then
+    // apply the last element's signature (prefix/postfix) to the full name.
+    if (nh.nameElements.empty())
+        return std::string();
+
+    // 1) Join names with delimiter
+    std::string qualified;
+    for (size_t i = 0; i < nh.nameElements.size(); ++i)
+    {
+        if (i > 0)
+            qualified += nh.nameDelimiter;
+        qualified += nh.nameElements[i].name;
+    }
+
+    // 2) Apply signature of the last element
+    const auto &last = nh.nameElements.back();
+    const bool hasPrefix = !last.prefix.empty();
+    const bool hasPostfix = !last.postfix.empty();
+    if (!hasPrefix && !hasPostfix)
+        return qualified;
+
+    std::string out;
+    out.reserve(last.prefix.size() + qualified.size() + last.postfix.size() + 1);
+    out += last.prefix;
+    if (hasPrefix && !qualified.empty())
+        out += ' ';
+    out += qualified;
+    out += last.postfix;
+    return out;
+}
+
+// Build line start offsets for fast [line,col] -> offset mapping (1-based lines/cols)
+static inline std::vector<size_t> buildLineOffsets(const std::string &text)
+{
+    std::vector<size_t> offs;
+    offs.reserve(1024);
+    offs.push_back(0); // line 1 starts at 0
+    for (size_t i = 0; i < text.size(); ++i)
+    {
+        if (text[i] == '\n')
+        {
+            offs.push_back(i + 1);
+        }
+    }
+    // add sentinel for end
+    offs.push_back(text.size());
+    return offs;
+}
+
+static inline std::string sliceByRange(const std::string &text, const std::vector<size_t> &lineOffs,
+                                       int startLine, int startCol, int endLine, int endCol)
+{
+    if (startLine <= 0 || endLine <= 0 || (size_t)startLine > lineOffs.size() || (size_t)endLine > lineOffs.size())
+        return std::string();
+    size_t start = lineOffs[(size_t)startLine - 1] + (startCol > 0 ? (size_t)startCol - 1 : 0);
+    size_t end = lineOffs[(size_t)endLine - 1] + (endCol > 0 ? (size_t)endCol - 1 : 0);
+    if (start > text.size()) start = text.size();
+    if (end > text.size()) end = text.size();
+    if (end < start) return std::string();
+    return text.substr(start, end - start);
 }
 
 int main(int argc, const char *argv[])
@@ -383,6 +552,151 @@ int main(int argc, const char *argv[])
                 std::string mapped = mapDbPathToLocal(f.filePath, indexedNorm, rootNorm);
                 std::cout << "  " << normalizePath(f.filePath) << " -> " << mapped << std::endl;
             }
+        }
+
+        // --- Generate chunks per file ---
+        std::cout << "Generating chunks to: " << cfg.chunk_output_root << std::endl;
+        const std::string outRoot = normalizePath(cfg.chunk_output_root);
+        for (const auto &f : selectedFiles)
+        {
+            // Determine local path for reading file text
+            std::string localPath = mapDbPathToLocal(f.filePath, indexedNorm, rootNorm);
+            // Fallbacks if mapping didn't produce an existing file
+            std::string fileText;
+            if (!readFileToBuffer(localPath, fileText))
+            {
+                // Try joining root_dir with relative to indexed_root
+                std::string relToIdx = makeRelativeTo(f.filePath, indexedNorm);
+                std::string alt = joinPath(rootNorm, relToIdx);
+                if (!readFileToBuffer(alt, fileText))
+                {
+                    // Try DB path as-is (may be relative to CWD)
+                    if (!readFileToBuffer(f.filePath, fileText))
+                    {
+                        std::cerr << "Warning: could not read source file: " << localPath << " (or alternatives), skipping file." << std::endl;
+                        continue;
+                    }
+                    else
+                    {
+                        localPath = f.filePath;
+                    }
+                }
+                else
+                {
+                    localPath = alt;
+                }
+            }
+            auto lineOffs = buildLineOffsets(fileText);
+
+            // Compute relative path for JSON metadata/output path
+            std::string relForOut;
+            if (!cfg.indexed_root.empty())
+                relForOut = makeRelativeTo(f.filePath, cfg.indexed_root);
+            if (relForOut.empty())
+            {
+                if (!cfg.root_dir.empty())
+                    relForOut = makeRelativeTo(localPath, cfg.root_dir);
+                if (relForOut.empty())
+                {
+                    auto p = normalizePath(f.filePath);
+                    auto pos = p.find_last_of('/');
+                    relForOut = (pos == std::string::npos) ? p : p.substr(pos + 1);
+                }
+            }
+
+            std::string outPath = joinPath(outRoot, relForOut + ".json");
+            if (!ensureParentDir(outPath))
+            {
+                std::cerr << "Warning: could not create parent directory for: " << outPath << std::endl;
+                continue;
+            }
+
+            // Build JSON for this file
+            yyjson_mut_doc *mdoc = yyjson_mut_doc_new(nullptr);
+            yyjson_mut_val *mroot = yyjson_mut_obj(mdoc);
+            yyjson_mut_doc_set_root(mdoc, mroot);
+            yyjson_mut_obj_add_str(mdoc, mroot, "file_path", relForOut.c_str());
+            yyjson_mut_val *chunksArr = yyjson_mut_arr(mdoc);
+            yyjson_mut_obj_add_val(mdoc, mroot, "chunks", chunksArr);
+
+            // Symbols for this file
+            auto itFileSyms = symbolsToVisitInFiles.find(f.id);
+            const auto &fileSyms = (itFileSyms != symbolsToVisitInFiles.end()) ? itFileSyms->second : symbols;
+
+            for (const auto &sym : fileSyms)
+            {
+                // Find SCOPE location within this file
+                auto locs = reader.getSourceLocationsForSymbolInFile(sym.id, f.id);
+                const sourcetrail::SourcetrailDBReader::SourceLocation *scopeLoc = nullptr;
+                for (const auto &loc : locs)
+                {
+                    if (loc.locationType == sourcetrail::LocationKind::SCOPE)
+                    {
+                        scopeLoc = &loc;
+                        break;
+                    }
+                }
+                if (!scopeLoc)
+                    continue; // require SCOPE
+
+                yyjson_mut_val *chunk = yyjson_mut_obj(mdoc);
+                yyjson_mut_arr_add_val(chunksArr, chunk);
+
+                yyjson_mut_obj_add_int(mdoc, chunk, "id", sym.id);
+                yyjson_mut_obj_add_str(mdoc, chunk, "type", symbolKindToString(sym.symbolKind));
+                std::string fqn = nameHierarchyToString(sym.nameHierarchy);
+                yyjson_mut_obj_add_strcpy(mdoc, chunk, "fully_qualified_name", fqn.c_str());
+                std::string simpleName;
+                if (!sym.nameHierarchy.nameElements.empty())
+                    simpleName = sym.nameHierarchy.nameElements.back().name;
+                yyjson_mut_obj_add_strcpy(mdoc, chunk, "name", simpleName.c_str());
+                yyjson_mut_obj_add_str(mdoc, chunk, "en_chunk", "");
+
+                yyjson_mut_val *outRefs = yyjson_mut_arr(mdoc);
+                yyjson_mut_obj_add_val(mdoc, chunk, "outgoing_references", outRefs);
+                if (sym.id >= 0 && sym.id < (int)outgoingAdj.size())
+                {
+                    for (const auto &edge : outgoingAdj[sym.id])
+                    {
+                        yyjson_mut_val *refObj = yyjson_mut_obj(mdoc);
+                        yyjson_mut_arr_add_val(outRefs, refObj);
+                        yyjson_mut_obj_add_str(mdoc, refObj, "type", edgeKindToString(static_cast<sourcetrail::EdgeKind>(edge.second)));
+                        yyjson_mut_obj_add_int(mdoc, refObj, "id", edge.first);
+                    }
+                }
+
+                yyjson_mut_obj_add_int(mdoc, chunk, "start_line", scopeLoc->startLine);
+                yyjson_mut_obj_add_int(mdoc, chunk, "start_column", scopeLoc->startColumn);
+                yyjson_mut_obj_add_int(mdoc, chunk, "end_line", scopeLoc->endLine);
+                yyjson_mut_obj_add_int(mdoc, chunk, "end_column", scopeLoc->endColumn);
+
+                std::string code = sliceByRange(fileText, lineOffs, scopeLoc->startLine, scopeLoc->startColumn, scopeLoc->endLine, scopeLoc->endColumn);
+                yyjson_mut_obj_add_strcpy(mdoc, chunk, "code_chunk", code.c_str());
+            }
+
+            // Write JSON file
+            size_t len = 0;
+            char *json = yyjson_mut_write(mdoc, YYJSON_WRITE_PRETTY, &len);
+            if (!json)
+            {
+                std::cerr << "Warning: failed to serialize JSON for: " << outPath << std::endl;
+                yyjson_mut_doc_free(mdoc);
+                continue;
+            }
+            {
+                std::ofstream ofs(outPath, std::ios::binary);
+                if (!ofs)
+                {
+                    std::cerr << "Warning: failed to open for write: " << outPath << std::endl;
+                }
+                else
+                {
+                    ofs.write(json, static_cast<std::streamsize>(len));
+                }
+            }
+            free(json);
+            yyjson_mut_doc_free(mdoc);
+            std::cout << "Wrote chunks: " << outPath << std::endl;
         }
 
         reader.close();
