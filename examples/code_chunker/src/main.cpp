@@ -670,13 +670,6 @@ int main(int argc, const char *argv[])
                 }
             }
 
-            std::string outPath = joinPath(outRoot, relForOut + ".json");
-            if (!ensureParentDir(outPath))
-            {
-                std::cerr << "Warning: could not create parent directory for: " << outPath << std::endl;
-                continue;
-            }
-
             // Build JSON for this file
             yyjson_mut_doc *mdoc = yyjson_mut_doc_new(nullptr);
             yyjson_mut_val *mroot = yyjson_mut_obj(mdoc);
@@ -689,10 +682,27 @@ int main(int argc, const char *argv[])
             auto itFileSyms = symbolsToVisitInFiles.find(f.id);
             const auto &fileSyms = (itFileSyms != symbolsToVisitInFiles.end()) ? itFileSyms->second : symbols;
 
+            int chunkCount = 0;
             for (const auto &sym : fileSyms)
             {
-                // Find SCOPE location within this file
-                auto locs = reader.getSourceLocationsForSymbolInFile(sym.id, f.id);
+                // Collect locations for this symbol that belong to the current file only
+                std::vector<sourcetrail::SourcetrailDBReader::SourceLocation> locs;
+                if (!sym.locations.empty())
+                {
+                    locs.reserve(sym.locations.size());
+                    for (const auto &l : sym.locations)
+                    {
+                        if (l.fileId == f.id)
+                            locs.push_back(l);
+                    }
+                }
+                if (locs.empty())
+                {
+                    // Query locations restricted to this file
+                    locs = reader.getSourceLocationsForSymbolInFile(sym.id, f.id);
+                }
+
+                // Prefer SCOPE locations in this file (i.e., definitions here)
                 const sourcetrail::SourcetrailDBReader::SourceLocation *scopeLoc = nullptr;
                 for (const auto &loc : locs)
                 {
@@ -702,24 +712,44 @@ int main(int argc, const char *argv[])
                         break;
                     }
                 }
-                if (!scopeLoc) {
-                    // in this case it should only have 1 token location
-                    for (const auto &loc : locs)
+                // If no SCOPE here: allow TOKEN fallback only for FIELDs that have no SCOPE anywhere
+                if (!scopeLoc)
+                {
+                    bool hasScopeAnywhere = false;
+                    for (const auto &lAll : sym.locations)
                     {
-                        if (loc.locationType == sourcetrail::LocationKind::TOKEN)
+                        if (lAll.locationType == sourcetrail::LocationKind::SCOPE)
                         {
-                            scopeLoc = &loc;
+                            hasScopeAnywhere = true;
                             break;
                         }
                     }
-                }
-                if (!scopeLoc) {
-                    std::cerr << "Warning: no SCOPE location found for symbol: " << sym.id << std::endl;
-                    continue; // no location in this file
+                    const sourcetrail::SourcetrailDBReader::SourceLocation *tokenHere = nullptr;
+                    if (sym.symbolKind == sourcetrail::SymbolKind::FIELD && !hasScopeAnywhere)
+                    {
+                        for (const auto &loc : locs)
+                        {
+                            if (loc.locationType == sourcetrail::LocationKind::TOKEN)
+                            {
+                                tokenHere = &loc;
+                                break;
+                            }
+                        }
+                    }
+                    if (tokenHere)
+                    {
+                        scopeLoc = tokenHere; // treat token range as chunk for fields without any scope
+                    }
+                    else
+                    {
+                        // No definition in this file; skip to avoid cross-file or reference-only chunks
+                        continue;
+                    }
                 }
 
                 yyjson_mut_val *chunk = yyjson_mut_obj(mdoc);
                 yyjson_mut_arr_add_val(chunksArr, chunk);
+                ++chunkCount;
 
                 yyjson_mut_obj_add_int(mdoc, chunk, "id", sym.id);
                 yyjson_mut_obj_add_str(mdoc, chunk, "type", symbolKindToString(sym.symbolKind));
@@ -751,6 +781,23 @@ int main(int argc, const char *argv[])
 
                 std::string code = sliceByRange(fileText, lineOffs, scopeLoc->startLine, scopeLoc->startColumn, scopeLoc->endLine, scopeLoc->endColumn);
                 yyjson_mut_obj_add_strcpy(mdoc, chunk, "code_chunk", code.c_str());
+            }
+
+            // If no chunks were produced for this file, skip writing any output
+            if (chunkCount == 0)
+            {
+                yyjson_mut_doc_free(mdoc);
+                std::cout << "Skipping file with zero chunks: " << relForOut << std::endl;
+                continue;
+            }
+
+            // Now ensure output directory and write JSON
+            std::string outPath = joinPath(outRoot, relForOut + ".json");
+            if (!ensureParentDir(outPath))
+            {
+                std::cerr << "Warning: could not create parent directory for: " << outPath << std::endl;
+                yyjson_mut_doc_free(mdoc);
+                continue;
             }
 
             // Write JSON file
