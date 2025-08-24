@@ -326,13 +326,32 @@ static inline std::vector<size_t> buildLineOffsets(const std::string &text)
 static inline std::string sliceByRange(const std::string &text, const std::vector<size_t> &lineOffs,
                                        int startLine, int startCol, int endLine, int endCol)
 {
-    if (startLine <= 0 || endLine <= 0 || (size_t)startLine > lineOffs.size() || (size_t)endLine > lineOffs.size())
+    // Validate basic bounds (lineOffs has a sentinel at index = number_of_lines)
+    if (startLine <= 0 || endLine <= 0)
         return std::string();
+    if ((size_t)startLine >= lineOffs.size() || (size_t)endLine >= lineOffs.size())
+        return std::string();
+
+    // Convert 1-based (line,col) with inclusive end column into 0-based [start, end) byte offsets.
+    // startCol/endCol of 0 are treated as beginning/end of line respectively.
     size_t start = lineOffs[(size_t)startLine - 1] + (startCol > 0 ? (size_t)startCol - 1 : 0);
-    size_t end = lineOffs[(size_t)endLine - 1] + (endCol > 0 ? (size_t)endCol - 1 : 0);
+    size_t end;
+    if (endCol > 0)
+    {
+        // Inclusive end column -> make it exclusive by not subtracting 1
+        end = lineOffs[(size_t)endLine - 1] + (size_t)endCol;
+    }
+    else
+    {
+        // endCol == 0 -> until end of the endLine (start of next line)
+        end = lineOffs[(size_t)endLine];
+    }
+
+    // Clamp to text size to avoid out-of-range
     if (start > text.size()) start = text.size();
     if (end > text.size()) end = text.size();
-    if (end < start) return std::string();
+    if (end < start) end = start;
+
     return text.substr(start, end - start);
 }
 
@@ -636,8 +655,21 @@ int main(int argc, const char *argv[])
                         break;
                     }
                 }
-                if (!scopeLoc)
-                    continue; // require SCOPE
+                if (!scopeLoc) {
+                    // in this case it should only have 1 token location
+                    for (const auto &loc : locs)
+                    {
+                        if (loc.locationType == sourcetrail::LocationKind::TOKEN)
+                        {
+                            scopeLoc = &loc;
+                            break;
+                        }
+                    }
+                }
+                if (!scopeLoc) {
+                    std::cerr << "Warning: no SCOPE location found for symbol: " << sym.id << std::endl;
+                    continue; // no location in this file
+                }
 
                 yyjson_mut_val *chunk = yyjson_mut_obj(mdoc);
                 yyjson_mut_arr_add_val(chunksArr, chunk);
