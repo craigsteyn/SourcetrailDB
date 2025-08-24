@@ -15,6 +15,7 @@
 // Simple JSON config structure
 struct ChunkerConfig
 {
+    std::string db_path; // path to the Sourcetrail DB
     std::string project_name;
     std::string project_description;
     std::string root_dir;
@@ -72,6 +73,7 @@ static bool parseConfig(const std::string &jsonPath, ChunkerConfig &cfg)
         }
     };
 
+    get_str("db_path", cfg.db_path);
     get_str("project_name", cfg.project_name);
     get_str("project_description", cfg.project_description);
     get_str("root_dir", cfg.root_dir);
@@ -98,6 +100,11 @@ static bool parseConfig(const std::string &jsonPath, ChunkerConfig &cfg)
 
     yyjson_doc_free(doc);
 
+    if (cfg.db_path.empty())
+    {
+        std::cerr << "Config missing 'db_path'." << std::endl;
+        return false;
+    }
     if (cfg.project_name.empty())
     {
         std::cerr << "Config missing 'project_name'." << std::endl;
@@ -357,17 +364,15 @@ static inline std::string sliceByRange(const std::string &text, const std::vecto
 
 int main(int argc, const char *argv[])
 {
-    // Expect: <db> <config.json>
-    if (argc < 3)
+    // Usage: <config.json>
+    if (argc < 2)
     {
         std::cout << "SourcetrailDB Code Chunker" << std::endl;
         std::cout << "==========================" << std::endl;
-        std::cout << "Usage:\n  code_chunker <database_path> <config_json_path>\n";
+        std::cout << "Usage:\n  code_chunker <config_json_path>\n";
         return 1;
     }
-
-    const std::string dbPath = argv[1];
-    const std::string jsonPath = argv[2];
+    std::string jsonPath = argv[1];
 
     ChunkerConfig cfg;
     if (!parseConfig(jsonPath, cfg))
@@ -380,8 +385,8 @@ int main(int argc, const char *argv[])
     }
 
     sourcetrail::SourcetrailDBReader reader;
-    std::cout << "Opening database: " << dbPath << std::endl;
-    if (!reader.open(dbPath))
+    std::cout << "Opening database: " << cfg.db_path << std::endl;
+    if (!reader.open(cfg.db_path))
     {
         std::cerr << "Error opening database: " << reader.getLastError() << std::endl;
         return 1;
@@ -486,6 +491,48 @@ int main(int argc, const char *argv[])
         else
         {
             selectedFiles = files; // include all when no filter provided
+        }
+
+        // Remove files whose output chunk already exists on disk
+        if (!selectedFiles.empty())
+        {
+            const std::string outRoot = normalizePath(cfg.chunk_output_root);
+            const size_t beforeCount = selectedFiles.size();
+            std::vector<sourcetrail::SourcetrailDBReader::File> filtered;
+            filtered.reserve(beforeCount);
+            for (const auto &f : selectedFiles)
+            {
+                // Derive output-relative path similarly to the emission phase, but without I/O
+                std::string relForOut;
+                if (!cfg.indexed_root.empty())
+                    relForOut = makeRelativeTo(f.filePath, cfg.indexed_root);
+                if (relForOut.empty())
+                {
+                    if (!cfg.root_dir.empty())
+                    {
+                        // Map DB path to local path using configured roots
+                        std::string localPathEst = mapDbPathToLocal(f.filePath, indexedNorm, rootNorm);
+                        relForOut = makeRelativeTo(localPathEst, cfg.root_dir);
+                    }
+                    if (relForOut.empty())
+                    {
+                        auto p = normalizePath(f.filePath);
+                        auto pos = p.find_last_of('/');
+                        relForOut = (pos == std::string::npos) ? p : p.substr(pos + 1);
+                    }
+                }
+
+                std::string outPath = joinPath(outRoot, relForOut + ".json");
+                std::ifstream existCheck(outPath, std::ios::binary);
+                if (!existCheck.good())
+                    filtered.push_back(f);
+            }
+            if (filtered.size() != beforeCount)
+            {
+                std::cout << "Skipping " << (beforeCount - filtered.size())
+                          << " files with existing chunks." << std::endl;
+            }
+            selectedFiles.swap(filtered);
         }
 
         std::cout << "Loading symbols and edges from database..." << std::endl;
