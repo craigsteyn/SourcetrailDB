@@ -969,6 +969,43 @@ std::vector<StorageNode> DatabaseStorage::findSymbolNodesBySerializedNameLike(co
 
 // --- Targeted read helper implementations ---
 
+std::vector<StorageNode> DatabaseStorage::getSymbolNodesByFileIds(const std::vector<int>& fileNodeIds) const
+{
+	if (fileNodeIds.empty()) return {};
+	// Build IN clause for file_node_id
+	std::string inClause;
+	inClause.reserve(fileNodeIds.size() * 6);
+	for (size_t i = 0; i < fileNodeIds.size(); ++i)
+	{
+		if (i) inClause += ",";
+		inClause += std::to_string(fileNodeIds[i]);
+	}
+	// Join: symbol s -> node n (symbol nodes), occurrence o (element_id refers to node id), source_location sl (file_node_id)
+	// Distinct to avoid duplicates if a symbol appears multiple times in a file.
+	std::string query =
+		"SELECT DISTINCT n.id, n.type, n.serialized_name "
+		"FROM symbol s "
+		"JOIN node n ON n.id = s.id "
+		"JOIN occurrence o ON o.element_id = n.id "
+		"JOIN source_location sl ON sl.id = o.source_location_id "
+		"WHERE sl.file_node_id IN (" + inClause + ");";
+
+	CppSQLite3Query q = executeQuery(query);
+	std::vector<StorageNode> nodes;
+	while (!q.eof())
+	{
+		const int id = q.getIntField(0, 0);
+		const int type = q.getIntField(1, -1);
+		const std::string ser = q.getStringField(2, "");
+		if (id != 0 && type != -1)
+		{
+			nodes.emplace_back(StorageNode(id, type, ser));
+		}
+		q.nextRow();
+	}
+	return nodes;
+}
+
 std::vector<StorageNode> DatabaseStorage::getNodesBySerializedNameExact(const std::string& serializedName) const
 {
 	CppSQLite3Query q = executeQuery("SELECT id, type, serialized_name FROM node WHERE serialized_name = '" + serializedName + "';");

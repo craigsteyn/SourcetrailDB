@@ -92,6 +92,9 @@ public:
 	std::vector<StorageNode> getAllSymbolNodes() const; // nodes that have an entry in symbol table
 	std::vector<StorageNode> findSymbolNodesBySerializedNameLike(const std::string& pattern) const; // pattern: SQL LIKE
 
+	// Fetch symbols that have occurrences in any of the given file node IDs
+	std::vector<StorageNode> getSymbolNodesByFileIds(const std::vector<int>& fileNodeIds) const;
+
 	template <typename ResultType>
 	std::vector<ResultType> getAll() const
 	{

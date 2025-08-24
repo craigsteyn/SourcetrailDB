@@ -288,6 +288,9 @@ public:
      */
     std::vector<SourceLocation> getSourceLocationsInFile(int fileId) const;
 
+    // New: Fetch symbols that have at least one location in any of the given file IDs
+    std::vector<Symbol> getSymbolsInFiles(const std::vector<int>& fileIds) const;
+
     /**
      * Get database statistics
      *

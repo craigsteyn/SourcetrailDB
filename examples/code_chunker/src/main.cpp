@@ -166,13 +166,13 @@ int main(int argc, const char* argv[]) {
         std::cout << "Loading files from database..." << std::endl;
         auto files = reader.getAllFiles();
         std::cout << "Loaded " << files.size() << " files from database." << std::endl;
-        // print a random selection of 20 files we loaded
-        const size_t maxFilesToShow = 20;
+        // print a random selection of files we loaded
+        const size_t maxFilesToShow = 5;
         std::random_device rd;
         std::mt19937 gen(rd());
-        std::shuffle(files.begin(), files.end(), gen);
         for (size_t i = 0; i < std::min(files.size(), maxFilesToShow); ++i) {
-            std::cout << "  " << files[i].filePath << std::endl;
+            auto index = gen() % files.size();
+            std::cout << "  " << files[index].filePath << std::endl;
         }
 
         // Build list of file path prefixes to include (DB space)
@@ -238,10 +238,10 @@ int main(int argc, const char* argv[]) {
             selectedFiles = files; // include all when no filter provided
         }
 
-        std::cout << "Loading symbols and edges from database..." << std::endl;
-        // Load symbols and edges into memory
-        auto symbols = reader.getAllSymbols();
-        std::cout << "Loaded " << symbols.size() << " symbols from database." << std::endl;
+    std::cout << "Loading symbols and edges from database..." << std::endl;
+    // Load symbols and edges into memory
+    auto symbols = reader.getAllSymbols();
+    std::cout << "Loaded " << symbols.size() << " symbols from database." << std::endl;
         auto edges = reader.getAllEdgesBrief();
         std::cout << "Loaded " << edges.size() << " edges from database." << std::endl;
         // Build adjacency lists for traversals
@@ -262,6 +262,20 @@ int main(int argc, const char* argv[]) {
                 incomingAdj[e.targetSymbolId].emplace_back(e.sourceSymbolId, static_cast<int>(e.edgeKind));
         }
         std::cout << "Built adjacency for " << (maxId + 1) << " symbol ID slots." << std::endl;
+
+        // Filter symbols to only those that appear in the selected files using a targeted DB query
+        std::vector<sourcetrail::SourcetrailDBReader::Symbol> symbolsToVisit;
+        if (!selectedFiles.empty() && !includePrefixesDB.empty()) {
+            std::vector<int> fileIds;
+            fileIds.reserve(selectedFiles.size());
+            for (const auto& f : selectedFiles) fileIds.push_back(f.id);
+            symbolsToVisit = reader.getSymbolsInFiles(fileIds);
+            std::cout << "Filtered symbols to " << symbolsToVisit.size() << " based on selected files (DB query)." << std::endl;
+        } else {
+            // When no file filter is provided, visit all symbols
+            symbolsToVisit = symbols;
+            std::cout << "No file filter provided; using all symbols (" << symbolsToVisit.size() << ")." << std::endl;
+        }
 
         // Also load the entire source_location table into memory via per-file fetch
         // (reader API exposes per-file and per-symbol; we gather per-file for coverage)

@@ -210,6 +210,7 @@ std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::getAllSymbols() co
     try {
         // targeted: only fetch nodes that are actually symbols via helper
         std::vector<StorageNode> storageNodes = m_databaseStorage->getAllSymbolNodes();
+        symbols.reserve(storageNodes.size());
         for (const auto& n : storageNodes) {
             Symbol s; s.id = n.id; s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName); s.symbolKind = nodeKindIntToSymbolKind(n.nodeKind);
             int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id); if (defKind >= 0) s.definitionKind = static_cast<DefinitionKind>(defKind); else s.definitionKind = DefinitionKind::EXPLICIT; symbols.push_back(std::move(s));
@@ -657,6 +658,33 @@ std::vector<SourcetrailDBReader::SourceLocation> SourcetrailDBReader::getSourceL
     }
 
     return locations;
+}
+
+std::vector<SourcetrailDBReader::Symbol> SourcetrailDBReader::getSymbolsInFiles(const std::vector<int>& fileIds) const
+{
+    std::vector<Symbol> symbols;
+    clearLastError();
+    if (!isOpen()) { setLastError("Database is not open"); return symbols; }
+    if (fileIds.empty()) return symbols;
+    try {
+        // Fetch symbol nodes limited to file set
+        std::vector<StorageNode> storageNodes = m_databaseStorage->getSymbolNodesByFileIds(fileIds);
+        symbols.reserve(storageNodes.size());
+        for (const auto& n : storageNodes) {
+            int defKind = m_databaseStorage->getDefinitionKindForSymbol(n.id);
+            if (defKind < 0) continue; // safety
+            Symbol s;
+            s.id = n.id;
+            s.nameHierarchy = parseSerializedNameHierarchy(n.serializedName);
+            s.symbolKind = nodeKindIntToSymbolKind(n.nodeKind);
+            s.definitionKind = static_cast<DefinitionKind>(defKind);
+            // locations omitted here to stay light; callers can query per-file if needed
+            symbols.push_back(std::move(s));
+        }
+    } catch (const std::exception& e) {
+        setLastError(std::string("Exception while getting symbols in files: ") + e.what());
+    }
+    return symbols;
 }
 
 std::string SourcetrailDBReader::getDatabaseStats() const
