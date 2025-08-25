@@ -278,6 +278,19 @@ static inline const char *symbolKindToString(sourcetrail::SymbolKind k)
     }
 }
 
+
+#define CODE_CHUNKER_DEBUG
+
+// Debug logging toggle via environment variable
+static inline bool debugEnabled()
+{
+    #if defined(CODE_CHUNKER_DEBUG)
+    return true;
+    #else
+    return false;
+    #endif
+}
+
 // not certain this functions is correct
 static inline std::string nameHierarchyToString(const sourcetrail::NameHierarchy &nh)
 {
@@ -504,8 +517,9 @@ int main(int argc, const char *argv[])
             {
                 // Derive output-relative path similarly to the emission phase, but without I/O
                 std::string relForOut;
-                if (!cfg.indexed_root.empty())
+                if (!cfg.indexed_root.empty()) {
                     relForOut = makeRelativeTo(f.filePath, cfg.indexed_root);
+                }
                 if (relForOut.empty())
                 {
                     if (!cfg.root_dir.empty())
@@ -533,6 +547,25 @@ int main(int argc, const char *argv[])
                           << " files with existing chunks." << std::endl;
             }
             selectedFiles.swap(filtered);
+        }
+
+
+        std::unordered_map<int, std::vector<sourcetrail::SourcetrailDBReader::Symbol>> symbolsToVisitInFiles;
+        if (!selectedFiles.empty())
+        {
+            std::vector<int> fileIds(1, -1);
+            int i = 0; 
+            int count = selectedFiles.size();
+            for (const auto &f : selectedFiles) {
+                fileIds[0] = f.id;
+                auto &symbols = symbolsToVisitInFiles[f.id];
+                symbols = reader.getSymbolsInFiles(fileIds);
+                for(auto &symbol : symbols) {
+                    symbol.locations = reader.getSourceLocationsForSymbol(symbol.id);
+                }
+                std::cout << "File (" << i++ << "/" << count << ") " << f.filePath << " has " << symbols.size() << " symbols." << std::endl;
+            }
+            std::cout << "Filtered symbols to " << symbolsToVisitInFiles.size() << " based on selected files (DB query)." << std::endl;
         }
 
         std::cout << "Loading symbols and edges from database..." << std::endl;
@@ -566,20 +599,7 @@ int main(int argc, const char *argv[])
         }
         std::cout << "Built adjacency for " << (maxId + 1) << " symbol ID slots." << std::endl;
 
-        std::unordered_map<int, std::vector<sourcetrail::SourcetrailDBReader::Symbol>> symbolsToVisitInFiles;
-        if (!selectedFiles.empty())
-        {
-            std::vector<int> fileIds(1, -1);
-            for (const auto &f : selectedFiles) {
-                fileIds[0] = f.id;
-                auto &symbols = symbolsToVisitInFiles[f.id];
-                symbols = reader.getSymbolsInFiles(fileIds);
-                for(auto &symbol : symbols)
-                    symbol.locations = reader.getSourceLocationsForSymbol(symbol.id);
-            }
-            std::cout << "Filtered symbols to " << symbolsToVisitInFiles.size() << " based on selected files (DB query)." << std::endl;
-        }
-        else
+        if (selectedFiles.empty())
         {
             std::cout << "No file filter provided; using all symbols (" << symbols.size() << ")." << std::endl;
         }
