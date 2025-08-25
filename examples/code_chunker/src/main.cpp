@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include <cctype>
 #include <chrono>
@@ -705,6 +706,11 @@ int main(int argc, const char *argv[])
             int chunkCount = 0;
             for (const auto &sym : fileSyms)
             {
+                // Skip generating chunks for any implicit symbols (compiler-generated, implicit specializations, etc.)
+                if (sym.definitionKind == sourcetrail::DefinitionKind::IMPLICIT)
+                {
+                    continue;
+                }
                 // Collect locations for this symbol that belong to the current file only
                 std::vector<sourcetrail::SourcetrailDBReader::SourceLocation> locs;
                 if (!sym.locations.empty())
@@ -780,6 +786,62 @@ int main(int argc, const char *argv[])
                     simpleName = sym.nameHierarchy.nameElements.back().name;
                 yyjson_mut_obj_add_strcpy(mdoc, chunk, "name", simpleName.c_str());
                 yyjson_mut_obj_add_str(mdoc, chunk, "en_chunk", "");
+
+                // Collect implicit template specializations related to this symbol (both directions)
+                yyjson_mut_val *tmplSpecs = yyjson_mut_arr(mdoc);
+                yyjson_mut_obj_add_val(mdoc, chunk, "template_specializations", tmplSpecs);
+                if (sym.id >= 0)
+                {
+                    std::unordered_set<int> seenIds;
+                    // Outgoing TEMPLATE_SPECIALIZATION neighbors
+                    if (sym.id < (int)outgoingAdj.size())
+                    {
+                        for (const auto &edge : outgoingAdj[sym.id])
+                        {
+                            if (static_cast<sourcetrail::EdgeKind>(edge.second) == sourcetrail::EdgeKind::TEMPLATE_SPECIALIZATION)
+                            {
+                                int nbr = edge.first;
+                                if (nbr >= 0 && nbr < (int)symIndexById.size())
+                                {
+                                    int si = symIndexById[nbr];
+                                    if (si >= 0)
+                                    {
+                                        const auto &nsym = symbols[(size_t)si];
+                                        if (nsym.definitionKind == sourcetrail::DefinitionKind::IMPLICIT && seenIds.insert(nbr).second)
+                                        {
+                                            std::string nfqn = nameHierarchyToString(nsym.nameHierarchy);
+                                            yyjson_mut_arr_add_strcpy(mdoc, tmplSpecs, nfqn.c_str());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Incoming TEMPLATE_SPECIALIZATION neighbors
+                    if (sym.id < (int)incomingAdj.size())
+                    {
+                        for (const auto &edge : incomingAdj[sym.id])
+                        {
+                            if (static_cast<sourcetrail::EdgeKind>(edge.second) == sourcetrail::EdgeKind::TEMPLATE_SPECIALIZATION)
+                            {
+                                int nbr = edge.first;
+                                if (nbr >= 0 && nbr < (int)symIndexById.size())
+                                {
+                                    int si = symIndexById[nbr];
+                                    if (si >= 0)
+                                    {
+                                        const auto &nsym = symbols[(size_t)si];
+                                        if (nsym.definitionKind == sourcetrail::DefinitionKind::IMPLICIT && seenIds.insert(nbr).second)
+                                        {
+                                            std::string nfqn = nameHierarchyToString(nsym.nameHierarchy);
+                                            yyjson_mut_arr_add_strcpy(mdoc, tmplSpecs, nfqn.c_str());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 yyjson_mut_val *outRefs = yyjson_mut_arr(mdoc);
                 yyjson_mut_obj_add_val(mdoc, chunk, "outgoing_references", outRefs);
